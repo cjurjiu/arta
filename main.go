@@ -63,39 +63,37 @@ type model struct {
 	prefixActive  bool
 }
 
-// Bell check tick message
-type bellCheckMsg struct{}
-
-func bellCheckTick() tea.Cmd {
-	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
-		return bellCheckMsg{}
-	})
+// Bell check result message (returned async)
+type bellResultMsg struct {
+	sessions []string
 }
 
-// Check tmux for sessions with bell alerts
-func checkTmuxBells(activeSession string) []string {
-	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name} #{session_alerts}").Output()
-	if err != nil {
-		return nil
+// Async bell check — runs tmux command in a Cmd so it doesn't block the event loop
+func bellCheckCmd(activeSession string) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(15 * time.Second)
+		out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name} #{session_alerts}").Output()
+		if err != nil {
+			return bellResultMsg{}
+		}
+		var alerted []string
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			parts := strings.SplitN(line, " ", 2)
+			if len(parts) < 2 {
+				continue
+			}
+			name := parts[0]
+			alerts := parts[1]
+			if !strings.HasPrefix(name, tmuxPrefix) {
+				continue
+			}
+			sessionID := strings.TrimPrefix(name, tmuxPrefix)
+			if sessionID != activeSession && alerts != "" {
+				alerted = append(alerted, sessionID)
+			}
+		}
+		return bellResultMsg{sessions: alerted}
 	}
-	var alertedSessions []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, " ", 2)
-		if len(parts) < 2 {
-			continue
-		}
-		name := parts[0]
-		alerts := parts[1]
-		if !strings.HasPrefix(name, tmuxPrefix) {
-			continue
-		}
-		sessionID := strings.TrimPrefix(name, tmuxPrefix)
-		// Only alert for non-active sessions that have alerts
-		if sessionID != activeSession && alerts != "" {
-			alertedSessions = append(alertedSessions, sessionID)
-		}
-	}
-	return alertedSessions
 }
 
 // --- tmux helpers ---
@@ -173,7 +171,7 @@ func newModel() model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.tuios.Init(), m.inputPanel.Init(), bellCheckTick())
+	return tea.Batch(m.tuios.Init(), m.inputPanel.Init(), bellCheckCmd(m.activeSession))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -199,7 +197,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 		return &m, tea.Batch(cmds...)
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
+		key := msg.Key()
+
 		// Input panel gets priority when active
 		if m.inputPanel.Active() {
 			var cmd tea.Cmd
@@ -211,13 +211,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Prefix key system
 		if m.prefixActive {
 			m.prefixActive = false
-			switch msg.String() {
-			case "left":
+			switch key.Code {
+			case tea.KeyLeft:
 				m.focus = focusSidebar
 				m.sidebar.SetFocused(true)
 				m.tuios.Mode = 0
 				return &m, nil
-			case "right":
+			case tea.KeyRight:
 				if m.termWindowIdx >= 0 {
 					m.focus = focusTerminal
 					m.sidebar.SetFocused(false)
@@ -226,7 +226,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return &m, nil
 			}
 		}
-		if msg.String() == "ctrl+@" || msg.String() == "ctrl+space" {
+		if key.Code == tea.KeySpace && key.Mod == tea.ModCtrl {
 			m.prefixActive = true
 			return &m, nil
 		}
@@ -235,10 +235,74 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.sidebar, cmd = m.sidebar.Update(msg)
 			cmds = append(cmds, cmd)
-		} else {
-			updated, cmd := m.tuios.Update(msg)
-			m.tuios = updated.(*tuios.Model)
-			cmds = append(cmds, cmd)
+		} else if m.termWindowIdx >= 0 && m.termWindowIdx < len(m.tuios.Windows) {
+			// Send keystrokes directly to the PTY — minimal path
+			win := m.tuios.Windows[m.termWindowIdx]
+			if win != nil {
+				// Printable text — fastest path, no switch needed
+				if key.Mod == 0 && key.Text != "" {
+					win.SendInput([]byte(key.Text))
+				} else if key.Mod == tea.ModCtrl {
+					// Ctrl+letter → control character
+					if key.Code >= 'a' && key.Code <= 'z' {
+						win.SendInput([]byte{byte(key.Code) - 'a' + 1})
+					}
+				} else {
+					// Special keys → escape sequences
+					switch key.Code {
+					case tea.KeyEnter:
+						win.SendInput([]byte{'\r'})
+					case tea.KeyBackspace:
+						win.SendInput([]byte{0x7f})
+					case tea.KeyTab:
+						win.SendInput([]byte{'\t'})
+					case tea.KeyEscape:
+						win.SendInput([]byte{0x1b})
+					case tea.KeyUp:
+						win.SendInput([]byte("\x1b[A"))
+					case tea.KeyDown:
+						win.SendInput([]byte("\x1b[B"))
+					case tea.KeyRight:
+						win.SendInput([]byte("\x1b[C"))
+					case tea.KeyLeft:
+						win.SendInput([]byte("\x1b[D"))
+					case tea.KeyHome:
+						win.SendInput([]byte("\x1b[H"))
+					case tea.KeyEnd:
+						win.SendInput([]byte("\x1b[F"))
+					case tea.KeyDelete:
+						win.SendInput([]byte("\x1b[3~"))
+					case tea.KeyPgUp:
+						win.SendInput([]byte("\x1b[5~"))
+					case tea.KeyPgDown:
+						win.SendInput([]byte("\x1b[6~"))
+					case tea.KeyF1:
+						win.SendInput([]byte("\x1bOP"))
+					case tea.KeyF2:
+						win.SendInput([]byte("\x1bOQ"))
+					case tea.KeyF3:
+						win.SendInput([]byte("\x1bOR"))
+					case tea.KeyF4:
+						win.SendInput([]byte("\x1bOS"))
+					case tea.KeyF5:
+						win.SendInput([]byte("\x1b[15~"))
+					case tea.KeyF6:
+						win.SendInput([]byte("\x1b[17~"))
+					case tea.KeyF7:
+						win.SendInput([]byte("\x1b[18~"))
+					case tea.KeyF8:
+						win.SendInput([]byte("\x1b[19~"))
+					case tea.KeyF9:
+						win.SendInput([]byte("\x1b[20~"))
+					case tea.KeyF10:
+						win.SendInput([]byte("\x1b[21~"))
+					case tea.KeyF11:
+						win.SendInput([]byte("\x1b[23~"))
+					case tea.KeyF12:
+						win.SendInput([]byte("\x1b[24~"))
+					}
+				}
+			}
 		}
 		return &m, tea.Batch(cmds...)
 
@@ -263,6 +327,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return &m, tea.Batch(cmds...)
 
+	// --- Delayed tmux attach ---
+
+	case attachReadyMsg:
+		if m.termWindowIdx >= 0 && m.termWindowIdx < len(m.tuios.Windows) {
+			win := m.tuios.Windows[m.termWindowIdx]
+			if win != nil {
+				win.SendInput([]byte(fmt.Sprintf("tmux attach-session -t %s\n", msg.tmuxName)))
+			}
+		}
+		return &m, nil
+
 	// --- Input panel results ---
 
 	case inputpanel.SubmitMsg:
@@ -279,11 +354,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sidebar.SelectSessionMsg:
 		m.sidebar.SetSelected(msg.ID)
 		m.sidebar.ClearAttention(msg.ID)
-		m.attachToSession(msg.ID)
+		cmd := m.attachToSession(msg.ID)
 		m.focus = focusTerminal
 		m.sidebar.SetFocused(false)
 		m.tuios.Mode = 1
-		return &m, nil
+		return &m, cmd
 
 	case sidebar.NewSessionMsg:
 		return m.createSession(msg.Project)
@@ -355,25 +430,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return &m, tea.Quit
 	}
 
-	// Bell check ticker
-	if _, ok := msg.(bellCheckMsg); ok {
-		alerted := checkTmuxBells(m.activeSession)
-		for _, sid := range alerted {
+	// Bell check result (async)
+	if result, ok := msg.(bellResultMsg); ok {
+		for _, sid := range result.sessions {
 			m.sidebar.SetAttention(sid)
 			playBell()
 		}
-		if len(alerted) > 0 {
+		if len(result.sessions) > 0 {
 			m.sidebar.Refresh()
 		}
-		cmds = append(cmds, bellCheckTick())
+		cmds = append(cmds, bellCheckCmd(m.activeSession))
 		return &m, tea.Batch(cmds...)
 	}
 
-	if m.focus == focusTerminal {
-		updated, cmd := m.tuios.Update(msg)
-		m.tuios = updated.(*tuios.Model)
-		cmds = append(cmds, cmd)
-	}
+	// Always pass non-key messages to TUIOS so it processes PTY output
+	updated, cmd := m.tuios.Update(msg)
+	m.tuios = updated.(*tuios.Model)
+	cmds = append(cmds, cmd)
 
 	return &m, tea.Batch(cmds...)
 }
@@ -488,7 +561,7 @@ func (m *model) createSession(projectName string) (tea.Model, tea.Cmd) {
 	}
 	tmuxCreateSession(tmuxName, path)
 
-	m.attachToSession(session.ID)
+	cmd := m.attachToSession(session.ID)
 	m.sidebar.SetSelected(session.ID)
 	m.sidebar.Refresh()
 
@@ -496,13 +569,16 @@ func (m *model) createSession(projectName string) (tea.Model, tea.Cmd) {
 	m.sidebar.SetFocused(false)
 	m.tuios.Mode = 1
 
-	return m, nil
+	return m, cmd
 }
 
-func (m *model) attachToSession(sessionID string) {
+// Delayed attach message
+type attachReadyMsg struct{ tmuxName string }
+
+func (m *model) attachToSession(sessionID string) tea.Cmd {
 	tmuxName := tmuxPrefix + sessionID
 	if !tmuxSessionExists(tmuxName) {
-		return
+		return nil
 	}
 
 	if m.termWindowIdx >= 0 && m.termWindowIdx < len(m.tuios.Windows) {
@@ -512,13 +588,15 @@ func (m *model) attachToSession(sessionID string) {
 
 	m.tuios.AddWindow(sessionID)
 	m.termWindowIdx = len(m.tuios.Windows) - 1
-	if m.termWindowIdx < len(m.tuios.Windows) && m.tuios.Windows[m.termWindowIdx] != nil {
-		m.tuios.Windows[m.termWindowIdx].SendInput(
-			[]byte(fmt.Sprintf("tmux attach-session -t %s\n", tmuxName)),
-		)
-	}
 	m.tuios.FocusWindow(m.termWindowIdx)
 	m.activeSession = sessionID
+
+	// Delay the tmux attach so the shell has time to start
+	name := tmuxName
+	return func() tea.Msg {
+		time.Sleep(200 * time.Millisecond)
+		return attachReadyMsg{tmuxName: name}
+	}
 }
 
 func (m *model) closeSession(id string) {
@@ -542,24 +620,46 @@ func (m model) View() tea.View {
 		return v
 	}
 
+	mainHeight := m.height
+	if m.inputPanel.Active() {
+		mainHeight = m.height - inputPanelHeight - 1
+		if mainHeight < 5 {
+			mainHeight = 5
+		}
+	}
+
+	// Update sidebar height for this frame
+	m.sidebar.SetSize(sidebarWidth, mainHeight)
 	sidebarView := m.sidebar.View()
-	tuiosView := m.tuios.View()
+
+	rightWidth := m.width - sidebarWidth - 1
+
+	// Right pane: TUIOS terminal or welcome screen
+	var rightPane string
+	if m.termWindowIdx >= 0 {
+		tuiosView := m.tuios.View()
+		rightPane = tuiosView.Content
+	} else {
+		rightPane = renderWelcome(rightWidth, mainHeight)
+	}
 
 	sep := lipgloss.NewStyle().
 		Faint(true).
-		Render(strings.Repeat("│\n", m.height))
-
-	mainHeight := m.height
-	if m.inputPanel.Active() {
-		mainHeight = m.height - inputPanelHeight
-	}
+		Render(strings.Repeat("│\n", mainHeight))
 
 	sidebarStyled := lipgloss.NewStyle().
 		Width(sidebarWidth).
 		Height(mainHeight).
+		MaxHeight(mainHeight).
 		Render(sidebarView)
 
-	topRow := lipgloss.JoinHorizontal(lipgloss.Top, sidebarStyled, sep, tuiosView.Content)
+	rightStyled := lipgloss.NewStyle().
+		Width(rightWidth).
+		Height(mainHeight).
+		MaxHeight(mainHeight).
+		Render(rightPane)
+
+	topRow := lipgloss.JoinHorizontal(lipgloss.Top, sidebarStyled, sep, rightStyled)
 
 	var content string
 	if m.inputPanel.Active() {
@@ -577,6 +677,63 @@ func (m model) View() tea.View {
 
 // --- Bell ---
 
+func renderWelcome(width, height int) string {
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#51afef"))
+	dim := lipgloss.NewStyle().Faint(true)
+	green := lipgloss.NewStyle().Foreground(lipgloss.Color("#98be65"))
+	pink := lipgloss.NewStyle().Foreground(lipgloss.Color("#ff6c6b"))
+	yellow := lipgloss.NewStyle().Foreground(lipgloss.Color("#ECBE7B"))
+	magenta := lipgloss.NewStyle().Foreground(lipgloss.Color("#c678dd"))
+	cyan := lipgloss.NewStyle().Foreground(lipgloss.Color("#46D9FF"))
+
+	flower := []string{
+		"",
+		"",
+		"",
+		title.Render("       A R T A"),
+		dim.Render("       Agent Runtime Terminal Application"),
+		"",
+		"",
+		magenta.Render("              _") + pink.Render("\\"),
+		magenta.Render("             ") + pink.Render("(_)"),
+		yellow.Render("         ") + pink.Render("@") + yellow.Render("  ") + magenta.Render("_|_") + yellow.Render("  ") + pink.Render("@"),
+		yellow.Render("        ") + pink.Render("@@@") + green.Render(" / ") + pink.Render("@@@"),
+		yellow.Render("         ") + pink.Render("@") + green.Render(" | ") + pink.Render("@"),
+		cyan.Render("    ,") + green.Render("      |"),
+		cyan.Render("   ") + green.Render("/") + cyan.Render("\\") + green.Render("     |      ") + yellow.Render("*"),
+		green.Render("  /   \\    |   ") + yellow.Render("*") + green.Render(" |"),
+		green.Render(" /     \\   |    \\|/"),
+		green.Render("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"),
+		"",
+		"",
+		dim.Render("   Select a project and press 'n'"),
+		dim.Render("   or press 'a' to add a project"),
+	}
+
+	// Center vertically
+	var b strings.Builder
+	padTop := (height - len(flower)) / 2
+	if padTop < 0 {
+		padTop = 0
+	}
+	for i := 0; i < padTop; i++ {
+		b.WriteString("\n")
+	}
+	for _, line := range flower {
+		// Center horizontally
+		pad := (width - 36) / 2
+		if pad < 0 {
+			pad = 0
+		}
+		b.WriteString(strings.Repeat(" ", pad) + line + "\n")
+	}
+	for i := padTop + len(flower); i < height; i++ {
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
 func playBell() {
 	sound := "/System/Library/Sounds/Tink.aiff"
 	if _, err := os.Stat(sound); err == nil {
@@ -587,7 +744,7 @@ func playBell() {
 func main() {
 	p := tea.NewProgram(
 		newModel(),
-		tea.WithFPS(60),
+		tea.WithFPS(120),
 	)
 
 	if _, err := p.Run(); err != nil {
