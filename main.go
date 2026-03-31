@@ -678,7 +678,6 @@ func (m model) View() tea.View {
 // --- Bell ---
 
 func renderWelcome(width, height int) string {
-	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#51afef"))
 	dim := lipgloss.NewStyle().Faint(true)
 	green := lipgloss.NewStyle().Foreground(lipgloss.Color("#98be65"))
 	pink := lipgloss.NewStyle().Foreground(lipgloss.Color("#ff6c6b"))
@@ -692,26 +691,27 @@ func renderWelcome(width, height int) string {
 	fr := frame.Render("║")
 	pad := lipgloss.NewStyle().Width(fw)
 
-	// Scene lines inside the painting frame
+	// Scene lines inside the painting frame (flower centered at pos ~14)
 	scene := []string{
 		"",
-		"             " + magenta.Render("_") + pink.Render("\\"),
-		"            " + pink.Render("(_)"),
-		"        " + pink.Render("@") + "  " + magenta.Render("_|_") + "  " + pink.Render("@"),
-		"       " + pink.Render("@@@") + green.Render(" / ") + pink.Render("@@@"),
-		"        " + pink.Render("@") + green.Render("  |  ") + pink.Render("@"),
-		green.Render("   ,       ") + green.Render("|") + "          " + yellow.Render("*"),
-		green.Render("  ") + cyan.Render("/\\") + green.Render("       |      ") + yellow.Render("*") + green.Render("   |    ") + cyan.Render(","),
-		green.Render(" /  \\   .  |    .   \\|/   / \\"),
-		green.Render("/ .  \\  |\\ |    |\\   |  / . \\"),
+		"                " + magenta.Render("_") + pink.Render("\\"),
+		"               " + pink.Render("(_)"),
+		"           " + pink.Render("@") + "  " + magenta.Render("_|_") + "  " + pink.Render("@"),
+		"          " + pink.Render("@@@") + green.Render(" / ") + pink.Render("@@@"),
+		"           " + pink.Render("@") + green.Render("  |  ") + pink.Render("@"),
+		green.Render("      ,       |") + "          " + yellow.Render("*"),
+		green.Render("     ") + cyan.Render("/\\") + green.Render("       |      ") + yellow.Render("*") + green.Render("   |    ") + cyan.Render(","),
+		green.Render("    /  \\   .  |    .   \\|/   / \\"),
+		green.Render("   / .  \\  |\\ |    |\\   |  / . \\"),
 		green.Render("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"),
 	}
 
 	// Build framed painting
 	var lines []string
 	lines = append(lines, "")
-	lines = append(lines, title.Render("        A R T A"))
-	lines = append(lines, dim.Render("        Agent Runtime Terminal Application"))
+	red := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ff6c6b"))
+	lines = append(lines, red.Render("               a r t a"))
+	lines = append(lines, dim.Render(" agent runtime terminal application"))
 	lines = append(lines, "")
 	lines = append(lines, frame.Render("╔"+strings.Repeat("═", fw)+"╗"))
 	for _, s := range scene {

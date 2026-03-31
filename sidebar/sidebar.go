@@ -328,10 +328,21 @@ func (m *Model) Refresh() {
 func (m Model) View() string {
 	var b strings.Builder
 
-	headerStyle := lipgloss.NewStyle().Bold(true)
 	dimStyle := lipgloss.NewStyle().Faint(true)
 
-	b.WriteString(headerStyle.Render(" ARTA"))
+	iconStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ECBE7B"))
+	nameStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ff6c6b"))
+	icon := "🖼️  "
+	if m.nerdFont {
+		icon = "\uf03e  "
+	}
+	header := iconStyle.Render(icon) + nameStyle.Render("a r t a")
+	hPad := (m.width - 11) / 2 // icon(~2) + 2 spaces + "a r t a"(7) ≈ 11
+	if hPad < 1 {
+		hPad = 1
+	}
+	b.WriteString("\n")
+	b.WriteString(strings.Repeat(" ", hPad) + header + "\n")
 	b.WriteString("\n")
 	b.WriteString(dimStyle.Render(" " + strings.Repeat("─", m.width-2)))
 	b.WriteString("\n")
@@ -373,7 +384,7 @@ func (m Model) View() string {
 
 			if m.expanded[p.Name] {
 				if len(sessions) == 0 {
-					b.WriteString(dimStyle.Render("    (no sessions)"))
+					b.WriteString(dimStyle.Render("    (no threads)"))
 					b.WriteString("\n")
 				}
 				for _, s := range sessions {
@@ -419,10 +430,10 @@ func (m Model) View() string {
 	b.WriteString("\n")
 
 	bold := lipgloss.NewStyle().Bold(true)
-	b.WriteString(bold.Render(" a") + dimStyle.Render(" add") + "  ")
+	b.WriteString(bold.Render(" a") + dimStyle.Render(" add project") + "  ")
 	b.WriteString(bold.Render("D") + dimStyle.Render(" remove") + "\n")
-	b.WriteString(bold.Render(" n") + dimStyle.Render(" new session") + "\n")
-	b.WriteString(bold.Render(" d") + dimStyle.Render(" close session") + "\n")
+	b.WriteString(bold.Render(" n") + dimStyle.Render(" new thread") + "\n")
+	b.WriteString(bold.Render(" d") + dimStyle.Render(" delete thread") + "\n")
 	b.WriteString(bold.Render(" r") + dimStyle.Render(" rename") + "  ")
 	b.WriteString(bold.Render("J/K") + dimStyle.Render(" reorder") + "\n")
 	b.WriteString(bold.Render(" q") + dimStyle.Render(" quit") + "  ")
