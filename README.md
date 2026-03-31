@@ -1,10 +1,10 @@
-# ARTA
+# 🖼️ ARTA
 
 **Agent Runtime Terminal Application**
 
 A terminal workspace manager for AI coding agents. Organize projects in a sidebar, manage multiple tmux-backed sessions, and switch between them — all from a single binary.
 
-> **Status:** Early prototype. The sidebar, project/session management, and tmux integration work well. Terminal embedding via TUIOS has known input lag issues — see [Known Issues](#known-issues). A launcher-model rewrite (sidebar alternates with fullscreen tmux) is being considered to eliminate this.
+> **Status:** Early prototype. Core features work well. Terminal embedding has minor input lag — see [Known Issues](#known-issues).
 
 ```
 ┌──────────────┬─────────────────────────────────┐
@@ -169,14 +169,8 @@ Disable in System Settings → Keyboard → Keyboard Shortcuts → Input Sources
 
 ## Documentation
 
-- [Architecture Notes](docs/architecture.md) — design decisions, tradeoffs, alternative approaches explored
-- [Implementation Log](docs/implementation-log.md) — chronological record of bugs, fixes, and learnings
-
-## Prior Art
-
-ARTA was also prototyped as an Emacs application (Doom Emacs + vterm + tmux). The Emacs version has no input lag but requires Emacs installed. See `docs/architecture.md` for comparison.
-
-Tools evaluated during design: [cmux](https://cmux.com/), [TUIOS](https://github.com/Gaurav-Gosain/tuios), [Zellij](https://zellij.dev/), [Toad](https://github.com/batrachianai/toad), [OpenCode/Crush](https://opencode.ai/).
+- [Architecture Notes](docs/architecture.md) — design decisions and known issues
+- [Implementation Log](docs/implementation-log.md) — bugs, fixes, and learnings
 
 ## License
 

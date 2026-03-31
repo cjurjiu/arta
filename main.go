@@ -685,49 +685,61 @@ func renderWelcome(width, height int) string {
 	yellow := lipgloss.NewStyle().Foreground(lipgloss.Color("#ECBE7B"))
 	magenta := lipgloss.NewStyle().Foreground(lipgloss.Color("#c678dd"))
 	cyan := lipgloss.NewStyle().Foreground(lipgloss.Color("#46D9FF"))
+	frame := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ECBE7B"))
 
-	flower := []string{
+	fw := 35 // frame inner width
+	fl := frame.Render("║")
+	fr := frame.Render("║")
+	pad := lipgloss.NewStyle().Width(fw)
+
+	// Scene lines inside the painting frame
+	scene := []string{
 		"",
-		"",
-		"",
-		title.Render("       A R T A"),
-		dim.Render("       Agent Runtime Terminal Application"),
-		"",
-		"",
-		magenta.Render("              _") + pink.Render("\\"),
-		magenta.Render("             ") + pink.Render("(_)"),
-		yellow.Render("         ") + pink.Render("@") + yellow.Render("  ") + magenta.Render("_|_") + yellow.Render("  ") + pink.Render("@"),
-		yellow.Render("        ") + pink.Render("@@@") + green.Render(" / ") + pink.Render("@@@"),
-		yellow.Render("         ") + pink.Render("@") + green.Render(" | ") + pink.Render("@"),
-		cyan.Render("    ,") + green.Render("      |"),
-		cyan.Render("   ") + green.Render("/") + cyan.Render("\\") + green.Render("     |      ") + yellow.Render("*"),
-		green.Render("  /   \\    |   ") + yellow.Render("*") + green.Render(" |"),
-		green.Render(" /     \\   |    \\|/"),
-		green.Render("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"),
-		"",
-		"",
-		dim.Render("   Select a project and press 'n'"),
-		dim.Render("   or press 'a' to add a project"),
+		"             " + magenta.Render("_") + pink.Render("\\"),
+		"            " + pink.Render("(_)"),
+		"        " + pink.Render("@") + "  " + magenta.Render("_|_") + "  " + pink.Render("@"),
+		"       " + pink.Render("@@@") + green.Render(" / ") + pink.Render("@@@"),
+		"        " + pink.Render("@") + green.Render("  |  ") + pink.Render("@"),
+		green.Render("   ,       ") + green.Render("|") + "          " + yellow.Render("*"),
+		green.Render("  ") + cyan.Render("/\\") + green.Render("       |      ") + yellow.Render("*") + green.Render("   |    ") + cyan.Render(","),
+		green.Render(" /  \\   .  |    .   \\|/   / \\"),
+		green.Render("/ .  \\  |\\ |    |\\   |  / . \\"),
+		green.Render("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"),
 	}
 
-	// Center vertically
+	// Build framed painting
+	var lines []string
+	lines = append(lines, "")
+	lines = append(lines, title.Render("        A R T A"))
+	lines = append(lines, dim.Render("        Agent Runtime Terminal Application"))
+	lines = append(lines, "")
+	lines = append(lines, frame.Render("╔"+strings.Repeat("═", fw)+"╗"))
+	for _, s := range scene {
+		lines = append(lines, fl+pad.Render(s)+fr)
+	}
+	lines = append(lines, frame.Render("╚"+strings.Repeat("═", fw)+"╝"))
+	lines = append(lines, "")
+	lines = append(lines, dim.Render("    Select a project and press 'n'"))
+	lines = append(lines, dim.Render("    or press 'a' to add a project"))
+
+	// Center vertically and horizontally
+	frameWidth := fw + 2
 	var b strings.Builder
-	padTop := (height - len(flower)) / 2
+	padTop := (height - len(lines)) / 2
 	if padTop < 0 {
 		padTop = 0
+	}
+	hPad := (width - frameWidth) / 2
+	if hPad < 0 {
+		hPad = 0
 	}
 	for i := 0; i < padTop; i++ {
 		b.WriteString("\n")
 	}
-	for _, line := range flower {
-		// Center horizontally
-		pad := (width - 36) / 2
-		if pad < 0 {
-			pad = 0
-		}
-		b.WriteString(strings.Repeat(" ", pad) + line + "\n")
+	for _, line := range lines {
+		b.WriteString(strings.Repeat(" ", hPad) + line + "\n")
 	}
-	for i := padTop + len(flower); i < height; i++ {
+	for i := padTop + len(lines); i < height; i++ {
 		b.WriteString("\n")
 	}
 

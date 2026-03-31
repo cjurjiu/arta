@@ -1,40 +1,8 @@
 # Implementation Log
 
-Chronological record of implementation decisions, bugs encountered, and solutions.
+Bugs, fixes, and technical notes.
 
-## Phase 1: Research & Emacs Prototype
-
-### Terminal Workspace Concept
-Goal: sidebar with projects, each having multiple sessions. Right pane is a real terminal that can run anything (claude, tmux, vim, etc.).
-
-### Existing Tools Evaluated
-- **cmux** — native macOS GUI app, vertical tabs. No project grouping, no persistence.
-- **TUIOS** — Go terminal multiplexer with workspaces. No sidebar.
-- **Zellij** — has session manager but no persistent sidebar. Plugin API can't control panes.
-- **Emacs + vterm** — can embed a real terminal and has a programmable sidebar. Winner for prototype.
-
-### Emacs Prototype Built
-- Doom Emacs as a separate profile (`~/.config/c-term/`)
-- vterm for terminal embedding
-- tmux for session persistence
-- Custom Elisp sidebar (~300 lines)
-- Launched via `cterm` script with `--init-directory`
-
-### Emacs Issues Encountered
-- **Evil mode key conflicts** — sidebar keybindings intercepted by evil's normal mode. Fixed with `map!` in Doom.
-- **vterm compilation** — needed `libtool` (`brew install libtool`) for `glibtool`. Also had to manually run cmake in the vterm build directory.
-- **`vterm-shell` dynamic var warning** — added `(defvar vterm-shell)` to suppress.
-- **Mouse drag passthrough** — doesn't work. Emacs's xterm-mouse-mode captures drag events before they reach vterm/tmux. Keyboard shortcuts for tmux pane resizing work fine.
-
-## Phase 2: Go + TUIOS Implementation
-
-### Why TUIOS
-- Single binary distribution
-- Native mouse support (in theory)
-- BubbleTea ecosystem (lipgloss, bubbles)
-- Library API for embedding
-
-### BubbleTea v2 API Changes
+## BubbleTea v2 API Changes
 - `View()` returns `tea.View` struct, not `string`. Use `tea.NewView(s)`.
 - `AltScreen` and `MouseMode` are fields on `tea.View`, not program options.
 - `tea.MouseMsg` is an interface with `.Mouse()` method, not a struct.
@@ -75,18 +43,7 @@ Goal: sidebar with projects, each having multiple sessions. Right pane is a real
 ### Text Input
 Originally used a hand-built input handler (single character at a time, no cursor movement). Replaced with Charm's `bubbles/v2/textinput` for proper cursor movement, and a full-width bottom panel for directory browsing with tab completion.
 
-## Phase 3: Naming
-
-### ARTA
-**Agent Runtime Terminal Application**
-
-Previously "c-term" (Emacs version) and "c-term-tuios" (Go version).
-
-tmux sessions prefixed with `arta_`. Config stored in `~/.config/arta/data/`.
-
-## Phase 4: Input Lag Reduction
-
-### Improvements Applied
+## Input Lag Reduction
 Three changes to reduce input lag in the terminal pane:
 
 1. **`tea.KeyPressMsg` instead of `tea.KeyMsg`** — BubbleTea v2's `KeyMsg` is an interface covering both presses and releases. Switching to `KeyPressMsg` avoids processing release events. Also uses typed fields (`Key.Code`, `Key.Mod`, `Key.Text`) instead of `msg.String()` string parsing, which is both faster and more correct for modified keys and non-ASCII input.
@@ -95,8 +52,4 @@ Three changes to reduce input lag in the terminal pane:
 
 3. **Minimal terminal key path** — Printable characters now take the fastest code path: `key.Text != ""` → `SendInput([]byte(key.Text))` with zero string parsing or switch statements. Only special keys (arrows, function keys, etc.) and Ctrl+letter combos go through the switch. Also added F1-F12 escape sequences that were previously missing.
 
-### Result
-Noticeable improvement in typing responsiveness. The fundamental BubbleTea frame delay remains (keystrokes still go through the event loop), but the per-keystroke processing overhead is significantly reduced.
-
-### Root Cause Confirmation
-Codex analysis of BubbleTea and TUIOS source confirmed: the "one key late" effect is because echoed PTY output arrives as a `PTYDataMsg` on the *next* message/frame, not the same turn as the keystroke. This is architectural — BubbleTea serializes all messages through `eventLoop → model.Update → render`.
+**Root cause:** BubbleTea serializes all messages through `eventLoop → model.Update → render`. Echoed PTY output arrives as a `PTYDataMsg` on the next frame, not the same turn as the keystroke. The mitigations reduce overhead but can't eliminate the architectural delay.

@@ -43,53 +43,6 @@ TUIOS has Window Management Mode (mode=0) and Terminal Mode (mode=1). We manuall
 ### Session Switching
 When switching tmux sessions, we destroy and recreate the TUIOS window because `SendInput` would type into whatever app is running (e.g., Claude Code), not the shell. The new window needs a 200ms delay before sending the `tmux attach` command so the shell has time to start.
 
-## Alternative Architectures Explored
-
-### 1. Emacs + vterm + tmux (Implemented, Working)
-**Location:** `~/.config/c-term/`
-
-The original prototype. Uses Doom Emacs with vterm for terminal embedding and tmux for session persistence.
-
-**Pros:**
-- No input lag — vterm handles terminal I/O natively via libvterm (C library)
-- Proper VT100 emulation
-- Sidebar works via Elisp
-- Full feature set working
-
-**Cons:**
-- Requires Emacs installed (~130MB)
-- Not distributable as a single binary
-- Elisp is niche
-- Mouse drag passthrough to tmux doesn't work (same limitation)
-
-### 2. Launcher Model (Not Implemented)
-Drop TUIOS. Use BubbleTea only for the sidebar. When user selects a session, suspend BubbleTea and exec `tmux attach` directly. tmux gets raw terminal access. When user detaches, BubbleTea resumes.
-
-**Pros:**
-- Zero input lag (tmux runs natively)
-- Full mouse support
-- No TUIOS dependency
-- Simplest code
-
-**Cons:**
-- Sidebar not visible alongside terminal (alternates with tmux)
-- UX is a launcher/switcher, not a persistent workspace view
-
-### 3. Fork TUIOS (Not Implemented)
-Fork TUIOS and add the sidebar directly into its codebase. Avoids the BubbleTea-TUIOS integration issues since everything is one app.
-
-**Pros:**
-- Native terminal handling
-- Single binary
-- Full mouse support
-
-**Cons:**
-- Maintaining a fork
-- Significant development effort
-
-### 4. Zellij Plugin (Not Feasible)
-Zellij has a WASM plugin system but plugins can't control the host's panes or sessions. No persistent sidebar API. No bell detection from outside.
-
 ## Key Design Decisions
 
 ### tmux as Persistence Layer
