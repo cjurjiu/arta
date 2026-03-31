@@ -1,4 +1,4 @@
-module github.com/catalinj/c-term-tuios
+module github.com/catalinj/arta
 
 go 1.26.1
 
@@ -9,8 +9,10 @@ require (
 )
 
 require (
+	charm.land/bubbles/v2 v2.1.0 // indirect
 	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be // indirect
+	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/ssh v0.0.0-20250826160808-ebfa259c7309 // indirect
@@ -32,7 +34,7 @@ require (
 	github.com/lrstanley/go-nf v0.0.0-20260224052632-5067bad45c5b // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
-	github.com/mattn/go-runewidth v0.0.19 // indirect
+	github.com/mattn/go-runewidth v0.0.21 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect

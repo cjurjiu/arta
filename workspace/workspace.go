@@ -29,7 +29,7 @@ type Workspace struct {
 
 func dataDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "c-term-tuios", "data")
+	return filepath.Join(home, ".config", "arta", "data")
 }
 
 func New() *Workspace {
