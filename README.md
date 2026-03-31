@@ -1,6 +1,6 @@
-# 🖼️ ARTA
+# 🖼️ a r t a
 
-**Agent Runtime Terminal Application**
+**agent runtime terminal application**
 
 A terminal workspace manager for AI coding agents. Organize projects in a sidebar, manage multiple tmux-backed sessions, and switch between them — all from a single binary.
 
