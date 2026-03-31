@@ -14,11 +14,9 @@ type Project struct {
 }
 
 type Session struct {
-	ID        string `json:"id"`
-	Project   string `json:"project"`
-	Created   string `json:"created"`
-	WindowIdx int    `json:"-"` // TUIOS window index, not persisted
-	Alive     bool   `json:"-"`
+	ID      string `json:"id"`
+	Project string `json:"project"`
+	Created string `json:"created"`
 }
 
 type Workspace struct {
@@ -125,7 +123,6 @@ func (w *Workspace) CreateSession(projectName string) *Session {
 		ID:      fmt.Sprintf("%s-%d", projectName, count+1),
 		Project: projectName,
 		Created: time.Now().UTC().Format(time.RFC3339),
-		Alive:   true,
 	}
 	w.Sessions = append(w.Sessions, session)
 	w.Save()

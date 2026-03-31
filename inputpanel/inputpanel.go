@@ -103,11 +103,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				if entry.isDir {
 					current := m.expandPath(m.input.Value())
 					dir := current
-					prefix := ""
 					if !strings.HasSuffix(current, "/") {
 						dir = filepath.Dir(current)
-						prefix = ""
-						_ = prefix
 					}
 					newPath := filepath.Join(dir, entry.name) + "/"
 					m.input.SetValue(newPath)

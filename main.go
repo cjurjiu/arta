@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -94,6 +95,13 @@ func bellCheckCmd(activeSession string) tea.Cmd {
 		}
 		return bellResultMsg{sessions: alerted}
 	}
+}
+
+// sanitizeName strips characters unsafe for tmux session names and shell interpolation.
+var safeNameRe = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+
+func sanitizeName(s string) string {
+	return safeNameRe.ReplaceAllString(s, "-")
 }
 
 // --- tmux helpers ---
@@ -487,7 +495,7 @@ func (m model) handleInputSubmit(value string) (tea.Model, tea.Cmd) {
 
 	case purposeProjectName:
 		if value != "" {
-			m.workspace.AddProject(value, m.pendingPath)
+			m.workspace.AddProject(sanitizeName(value), m.pendingPath)
 			m.sidebar.Refresh()
 		}
 		m.inputPurpose = purposeNone
@@ -497,8 +505,9 @@ func (m model) handleInputSubmit(value string) (tea.Model, tea.Cmd) {
 		return &m, nil
 
 	case purposeRenameProject:
-		if value != "" && value != m.inputContext {
-			m.workspace.RenameProject(m.inputContext, value)
+		newName := sanitizeName(value)
+		if newName != "" && newName != m.inputContext {
+			m.workspace.RenameProject(m.inputContext, newName)
 			m.sidebar.Refresh()
 		}
 		m.inputPurpose = purposeNone
@@ -507,8 +516,16 @@ func (m model) handleInputSubmit(value string) (tea.Model, tea.Cmd) {
 		return &m, nil
 
 	case purposeRenameSession:
-		if value != "" && value != m.inputContext {
-			m.workspace.RenameSession(m.inputContext, value)
+		newID := sanitizeName(value)
+		if newID != "" && newID != m.inputContext {
+			oldTmux := tmuxPrefix + m.inputContext
+			newTmux := tmuxPrefix + newID
+			exec.Command("tmux", "rename-session", "-t", oldTmux, newTmux).Run()
+			m.workspace.RenameSession(m.inputContext, newID)
+			if m.activeSession == m.inputContext {
+				m.activeSession = newID
+			}
+			m.sidebar.SetSelected(newID)
 			m.sidebar.Refresh()
 		}
 		m.inputPurpose = purposeNone
@@ -528,7 +545,17 @@ func (m model) handleInputSubmit(value string) (tea.Model, tea.Cmd) {
 	case purposeConfirmRemoveProject:
 		if value == "y" || value == "Y" {
 			for _, s := range m.workspace.SessionsForProject(m.inputContext) {
-				m.closeSession(s.ID)
+				tmuxName := tmuxPrefix + s.ID
+				if tmuxSessionExists(tmuxName) {
+					tmuxKillSession(tmuxName)
+				}
+				if m.activeSession == s.ID {
+					m.activeSession = ""
+					if m.termWindowIdx >= 0 && m.termWindowIdx < len(m.tuios.Windows) {
+						m.tuios.DeleteWindow(m.termWindowIdx)
+					}
+					m.termWindowIdx = -1
+				}
 			}
 			m.workspace.RemoveProject(m.inputContext)
 			m.sidebar.Refresh()
@@ -606,6 +633,10 @@ func (m *model) closeSession(id string) {
 	}
 	if m.activeSession == id {
 		m.activeSession = ""
+		if m.termWindowIdx >= 0 && m.termWindowIdx < len(m.tuios.Windows) {
+			m.tuios.DeleteWindow(m.termWindowIdx)
+		}
+		m.termWindowIdx = -1
 	}
 	m.workspace.RemoveSession(id)
 	m.sidebar.Refresh()
