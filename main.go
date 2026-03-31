@@ -680,12 +680,14 @@ func (m model) View() tea.View {
 
 	sidebarStyled := lipgloss.NewStyle().
 		Width(sidebarWidth).
+		MaxWidth(sidebarWidth).
 		Height(mainHeight).
 		MaxHeight(mainHeight).
 		Render(sidebarView)
 
 	rightStyled := lipgloss.NewStyle().
 		Width(rightWidth).
+		MaxWidth(rightWidth).
 		Height(mainHeight).
 		MaxHeight(mainHeight).
 		Render(rightPane)
