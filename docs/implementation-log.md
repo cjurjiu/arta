@@ -1,55 +1,31 @@
 # Implementation Log
 
-Bugs, fixes, and technical notes.
+Bugs, fixes, and technical notes for the Rust/Ratatui implementation.
 
-## BubbleTea v2 API Changes
-- `View()` returns `tea.View` struct, not `string`. Use `tea.NewView(s)`.
-- `AltScreen` and `MouseMode` are fields on `tea.View`, not program options.
-- `tea.MouseMsg` is an interface with `.Mouse()` method, not a struct.
-- Escape key is `"esc"`, not `"escape"`.
-- `tea.WithAltScreen()` and `tea.WithMouseCellMotion()` don't exist in v2.
+## PTY Lifecycle
 
-### TUIOS Internal Access
-- `tuios.Model` is a type alias for `internal/app.OS` — all internal fields are exported.
-- `AddWindow()`, `DeleteWindow()`, `FocusWindow()` work on the public Model.
-- `Windows` field gives direct access to `[]*terminal.Window`.
-- `Window.SendInput([]byte)` sends raw bytes to the PTY.
-- `Mode` field: 0 = WindowManagementMode, 1 = TerminalMode.
-- Can't import `internal/app` directly — use integer constants.
-- `SwitchWorkspace(n)` switches between workspaces 1-9.
+- `portable-pty` spawns `tmux attach-session -t <name>` in each PTY
+- Reader thread blocks on `read()`, feeds data to `vt100::Parser` behind `Arc<Mutex<>>`
+- On Drop, `alive` flag is set to false and reader handle is detached (not joined — joining would deadlock since the PTY master fd hasn't closed yet)
+- Dropping the PTY master closes the fd, which causes the reader to get EOF and exit naturally
 
-### Input Lag Problem
-**Symptom:** Characters appear one keystroke late, or are missed entirely.
+## Bell Detection
 
-**Attempted fixes:**
-1. Set TUIOS to terminal mode automatically → reduced but didn't fix
-2. Bypass TUIOS key handler, send directly to PTY via `SendInput` → still laggy
-3. Made bell check async (goroutine + sleep instead of `tea.Tick` + sync exec) → helped but core issue remains
+BEL character (0x07) is detected inline in the PTY output stream by the reader thread. When found, a `PaneEvent::Bell` is sent via `mpsc::channel` to the main thread. No polling required — every attached session is monitored continuously.
 
-**Root cause:** BubbleTea's event loop is not designed for forwarding raw input to a child PTY in real-time. There's always a frame of delay.
+## Session ID Generation
 
-### Session Switching Problem
-**Symptom:** `tmux attach-session -t ...` command typed into Claude Code's input instead of shell.
+Session IDs are `<project>-<N>` where N is the count of existing sessions for that project + 1. Note: deleting session 1 of 3 then creating a new one produces `project-3` (not a gap-filling scheme).
 
-**Fix:** Destroy and recreate the TUIOS window on every session switch. New window starts with a fresh shell. Added 200ms delay via `tea.Cmd` goroutine before sending the attach command.
+## Ctrl+Space as Prefix Key
 
-### Ctrl+Space as Prefix Key
-**Issue:** macOS captures Ctrl+Space for input source switching.
+macOS captures Ctrl+Space for input source switching by default. Users must disable this in System Settings → Keyboard → Keyboard Shortcuts → Input Sources.
 
-**Fix:** User disables in System Settings → Keyboard → Keyboard Shortcuts → Input Sources.
+Ctrl+Space activates prefix mode. The next keypress is interpreted as a command (sidebar keybindings or arrow keys for focus). When sidebar is focused, keys work directly without prefix.
 
-**Implementation:** BubbleTea sends individual key events, not chords. Built a prefix key system: first keypress sets `prefixActive=true`, next keypress checks for left/right arrow.
+## Focus Indicators
 
-### Text Input
-Originally used a hand-built input handler (single character at a time, no cursor movement). Replaced with Charm's `bubbles/v2/textinput` for proper cursor movement, and a full-width bottom panel for directory browsing with tab completion.
-
-## Input Lag Reduction
-Three changes to reduce input lag in the terminal pane:
-
-1. **`tea.KeyPressMsg` instead of `tea.KeyMsg`** — BubbleTea v2's `KeyMsg` is an interface covering both presses and releases. Switching to `KeyPressMsg` avoids processing release events. Also uses typed fields (`Key.Code`, `Key.Mod`, `Key.Text`) instead of `msg.String()` string parsing, which is both faster and more correct for modified keys and non-ASCII input.
-
-2. **FPS raised from 60 to 120** — BubbleTea's renderer is frame-driven. At 60 FPS, the render frame is ~16ms. At 120 FPS (the maximum), it's ~8ms. This halves the worst-case delay between PTY output arriving and being rendered.
-
-3. **Minimal terminal key path** — Printable characters now take the fastest code path: `key.Text != ""` → `SendInput([]byte(key.Text))` with zero string parsing or switch statements. Only special keys (arrows, function keys, etc.) and Ctrl+letter combos go through the switch. Also added F1-F12 escape sequences that were previously missing.
-
-**Root cause:** BubbleTea serializes all messages through `eventLoop → model.Update → render`. Echoed PTY output arrives as a `PTYDataMsg` on the next frame, not the same turn as the keystroke. The mitigations reduce overhead but can't eliminate the architectural delay.
+- Sidebar focused: existing separators (below header, above footer) turn red+bold
+- Terminal focused: red+bold top/bottom border lines appear
+- Unfocused pane: no visible borders (separators go dim for sidebar)
+- Clicking on either pane switches focus

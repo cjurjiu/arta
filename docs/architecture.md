@@ -2,55 +2,52 @@
 
 ## Overview
 
-ARTA is a terminal workspace manager for AI coding agents. It provides a sidebar for managing projects and sessions, with tmux as the session backend.
+ARTA is a terminal workspace manager for AI coding agents. It provides a sidebar for managing projects and sessions, with each session backed by a tmux session containing an embedded PTY rendered via ratatui.
 
-## Current Implementation: Go + TUIOS + tmux
+## Architecture
 
 ```
-ARTA (Go binary)
-├── Sidebar (BubbleTea component)
-│   └── Project & session management
-├── Input Panel (BubbleTea component)
-│   └── Full-width bottom panel with textinput + directory browser
-├── TUIOS (terminal multiplexer library)
-│   └── Single PTY window for active tmux session
-├── tmux (persistence + session isolation layer)
-│   └── One tmux session per ARTA session
-│       ├── Window "claude" → auto-launches `claude`
-│       └── Window "terminal" → plain shell
-└── workspace.json (~/.config/arta/data/)
-    └── Projects & sessions state
+ARTA (Rust binary)
+├── App (main event loop + focus routing)
+│   ├── Sidebar (ratatui widget)
+│   │   └── Project & session tree, keyboard nav, mouse clicks
+│   ├── TerminalPane (one per session)
+│   │   ├── portable-pty → spawns `tmux attach-session -t <name>`
+│   │   ├── vt100::Parser (fed by background reader thread)
+│   │   └── tui-term::PseudoTerminal (renders parser screen)
+│   ├── InputPanel (ratatui widget)
+│   │   └── Text input with path completion + directory browser
+│   └── WelcomeScreen (shown when no session is active)
+├── Workspace (serde JSON persistence)
+│   └── ~/.config/arta/data/workspace.json
+└── tmux (external, unchanged)
+    └── One tmux session per ARTA session
+        ├── Window "claude" → auto-launches claude
+        └── Window "terminal" → plain shell
 ```
 
-## Known Issues & Limitations
+## Threading Model
 
-### Input Lag (Reduced, Not Eliminated)
-BubbleTea's event loop processes all keystrokes, then we forward them to the TUIOS PTY. Echoed PTY output arrives as a `PTYDataMsg` on the next message/frame, not the same turn as the keystroke. Mitigations applied:
-- Switched from `tea.KeyMsg` to `tea.KeyPressMsg` with typed field access (avoids string parsing)
-- Printable characters take a fast path: `key.Text` → `SendInput()` with no switch/string matching
-- Raised FPS from 60 to 120 (halves worst-case render delay)
-- Bypassed TUIOS's key handler, sending directly to PTY via `SendInput`
-- Made bell checker async to avoid blocking the event loop
+- **Main thread:** crossterm event poll → dispatch to focused widget → render (~60fps)
+- **Per-session reader thread:** blocking `read()` on PTY master → feed bytes into `Arc<Mutex<vt100::Parser>>` → if BEL (0x07) detected, send notification via `mpsc::Sender`
+- **Communication:** `mpsc::channel` carries bell notifications + session death signals from reader threads to main thread
 
-**Root cause:** BubbleTea serializes all messages through `eventLoop → model.Update → render`. This is architectural and cannot be fully eliminated without leaving BubbleTea's event loop (e.g., launcher model).
+No async runtime (tokio, etc.) is used. Plain `std::thread` + `std::sync::mpsc`.
 
-### Mouse Drag Passthrough
-tmux pane resizing via mouse drag doesn't work. TUIOS intercepts drag events for its own window management before they reach the terminal process. Scrolling and clicks work, drags don't.
+## Input Path (Low Latency)
 
-### TUIOS Mode System
-TUIOS has Window Management Mode (mode=0) and Terminal Mode (mode=1). We manually set `m.tuios.Mode = 1` when the terminal is focused, but this is a hack. TUIOS's internal state management can conflict with our routing.
+When the terminal pane is focused, crossterm key events are converted to raw bytes and written directly to the active session's PTY master fd. This happens synchronously in the event handler — no message queue, no frame delay.
 
-### Session Switching
-When switching tmux sessions, we destroy and recreate the TUIOS window because `SendInput` would type into whatever app is running (e.g., Claude Code), not the shell. The new window needs a 200ms delay before sending the `tmux attach` command so the shell has time to start.
+## Session Switching
+
+Instead of destroying/recreating terminal windows on switch, ARTA maintains a `HashMap<String, TerminalPane>`. Each session has its own PTY + vt100::Parser running continuously. Switching sessions just changes which parser's screen is rendered — instant, no teardown.
 
 ## Key Design Decisions
 
 ### tmux as Persistence Layer
 tmux was chosen because:
 - Sessions survive application crashes/restarts
-- Client-server architecture allows bell detection via `tmux list-sessions`
 - Each session is fully isolated (own windows, panes, env)
-- `monitor-bell` + `bell-action` track alerts even with no client attached
 - Widely installed, well-documented
 
 ### Per-Session tmux Layout
@@ -58,11 +55,14 @@ Each session creates a tmux session with two windows:
 - **"claude"** — auto-runs `claude` command on creation
 - **"terminal"** — plain shell for manual commands
 
-### Bell Polling
-Every 15 seconds, ARTA runs `tmux list-sessions -F "#{session_name} #{session_alerts}"` in a background goroutine to detect bells in non-active sessions. This avoids blocking the UI.
+### Eager PTY Attachment
+On startup, all surviving tmux sessions get PTYs attached immediately. This enables inline bell detection (BEL character in PTY output) without polling.
 
 ### Workspace Persistence
 Projects and sessions stored in `~/.config/arta/data/workspace.json`. On startup, dead sessions (tmux sessions that no longer exist) are pruned.
+
+### Prefix Key System
+`Ctrl+Space` activates prefix mode. The next key is interpreted as a command — arrow keys for focus switching, or any sidebar keybinding (a, n, d, q, etc.). This allows accessing sidebar commands from the terminal without switching focus first.
 
 ### Nerd Font Detection
 On startup, runs `fc-list` and checks for "Nerd Font" in the output. Uses icon codepoints when available, falls back to Unicode symbols.

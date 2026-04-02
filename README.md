@@ -4,7 +4,7 @@
 
 A terminal workspace manager for AI coding agents. Organize projects in a sidebar, manage multiple tmux-backed sessions, and switch between them — all from a single binary.
 
-> **Status:** Early prototype. Core features work well. Terminal embedding has minor input lag — see [Known Issues](#known-issues).
+> **Status:** Early prototype. Rewritten in Rust with [Ratatui](https://ratatui.rs/) for low-latency terminal embedding.
 
 ```
 ┌──────────────┬─────────────────────────────────┐
@@ -31,32 +31,29 @@ A terminal workspace manager for AI coding agents. Organize projects in a sideba
 - **Project sidebar** — add, rename, reorder, and remove projects
 - **Tmux-backed sessions** — each session is an isolated tmux session with "claude" and "terminal" windows
 - **Session persistence** — quit ARTA, sessions keep running. Reopen and reattach instantly
-- **Bell detection** — polls tmux every 15s for alerts in background sessions, shows indicator + plays sound
+- **Bell detection** — detects BEL character inline from PTY output, shows indicator + plays sound
 - **Nerd Font detection** — auto-detects and uses icons when available, falls back to Unicode
 - **Full-width input panel** — tab-complete paths, browse directories, rename with full cursor support
-- **Single binary** — built on [TUIOS](https://github.com/Gaurav-Gosain/tuios) and [BubbleTea](https://github.com/charmbracelet/bubbletea)
+- **Single binary** — built with [Ratatui](https://ratatui.rs/) + [tui-term](https://github.com/a-kenji/tui-term) + [portable-pty](https://docs.rs/portable-pty)
 
 ## Install
 
 ### From source
 
 ```bash
-brew install go tmux  # if not already installed
+brew install tmux     # if not already installed
+# Install Rust: https://rustup.rs/
 git clone https://github.com/catalinj/arta.git
 cd arta
-go build -o build/bin/arta .
+cargo build --release
 ```
 
-Add to your PATH:
-
-```bash
-export PATH="/path/to/arta/build/bin:$PATH"
-```
+The binary is at `target/release/arta`. Add it to your PATH or copy it somewhere convenient.
 
 ### Requirements
 
 - macOS or Linux
-- Go 1.21+
+- Rust 1.70+ (via [rustup](https://rustup.rs/))
 - tmux
 - A terminal emulator (iTerm2, Ghostty, Kitty, etc.)
 - Optional: a [Nerd Font](https://www.nerdfonts.com/) for icons
@@ -85,12 +82,19 @@ arta
 | `q` | Quit (sessions survive) |
 | `Q` | Clean exit (kill all sessions) |
 
-### Navigation
+### Prefix key (`Ctrl+Space`)
 
-| Key | Action |
+`Ctrl+Space` is the prefix key. Press it, then press a command:
+
+| After `Ctrl+Space` | Action |
 |-----|--------|
-| `Ctrl+Space` → `Left` | Focus sidebar |
-| `Ctrl+Space` → `Right` | Focus terminal |
+| `Left` | Focus sidebar |
+| `Right` | Focus terminal |
+| Any sidebar key | Executes that command (e.g., `a`, `n`, `d`, `q`) |
+
+When the sidebar is focused, all keys work directly without the prefix. The prefix is how you access sidebar commands from the terminal.
+
+You can also click on either pane to switch focus.
 
 Note: `Ctrl+Space` requires disabling macOS input source switching (see Requirements).
 
@@ -118,13 +122,14 @@ When adding a project or renaming:
 ## Architecture
 
 ```
-ARTA (Go binary)
-├── Sidebar (BubbleTea component)
+ARTA (Rust binary)
+├── Sidebar (ratatui widget)
 │   └── Project & session management
-├── Input Panel (BubbleTea + bubbles/textinput)
+├── Input Panel (ratatui widget)
 │   └── Full-width bottom panel for path/rename input
-├── TUIOS (terminal multiplexer library)
-│   └── Single PTY window for active tmux session
+├── Terminal Panes (one per session, via portable-pty + tui-term)
+│   ├── vt100::Parser processes PTY output on background thread
+│   └── tui-term::PseudoTerminal renders to ratatui buffer
 ├── tmux (persistence + isolation layer)
 │   └── One tmux session per ARTA session
 │       ├── Window "claude" → auto-launches claude
@@ -137,23 +142,15 @@ ARTA (Go binary)
 
 - The **sidebar** manages projects and sessions in `~/.config/arta/data/workspace.json`
 - Each **session** maps to a tmux session named `arta_<project>-<n>`
-- **TUIOS** provides a terminal pane that attaches to the active tmux session
-- When you **switch sessions**, ARTA recreates the terminal pane with a fresh `tmux attach`
-- **Bell detection** polls `tmux list-sessions` every 15s for alerts on background sessions
+- Each session has its own **PTY** (via `portable-pty`) attached to its tmux session
+- A background **reader thread** per session feeds PTY output into a `vt100::Parser`
+- **Switching sessions** just changes which parser's screen is rendered — instant, no teardown
+- **Bell detection** is inline: when BEL (0x07) appears in PTY output, the reader thread notifies the main thread
+- **Key input** is written directly to the active PTY's master fd — no message queue, minimal latency
 - When you **quit** (`q`), tmux sessions stay alive — reopen ARTA to reattach
 - When you **clean exit** (`Q`), all `arta_*` tmux sessions are killed
 
 ## Known Issues
-
-### Input lag in terminal pane
-BubbleTea processes all keystrokes through its event loop before forwarding to the PTY. This causes characters to appear late or be missed. This is a fundamental limitation of embedding a terminal inside a BubbleTea application.
-
-**Workaround:** Use tmux keybindings for navigation within sessions. The lag is most noticeable during fast typing.
-
-**Potential fix:** Rewrite to a "launcher model" where selecting a session suspends ARTA and runs `tmux attach` fullscreen (native terminal, zero lag). Detaching returns to the ARTA sidebar.
-
-### Mouse drag doesn't pass through to tmux
-TUIOS intercepts drag events. Scrolling and clicks work. Use keyboard shortcuts for tmux pane resizing.
 
 ### Ctrl+Space captured by macOS
 Disable in System Settings → Keyboard → Keyboard Shortcuts → Input Sources.
