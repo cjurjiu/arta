@@ -325,6 +325,21 @@ impl App {
                     self.forward_mouse_to_pane(mouse);
                 }
             }
+            Event::Paste(text) => {
+                if self.focus == Focus::Terminal {
+                    if let Some(session_id) = &self.active_session {
+                        if let Some(pane) = self.panes.get_mut(session_id) {
+                            // Send bracketed paste to the PTY so the application
+                            // receives the entire paste as a single block
+                            let mut buf = Vec::new();
+                            buf.extend_from_slice(b"\x1b[200~");
+                            buf.extend_from_slice(text.as_bytes());
+                            buf.extend_from_slice(b"\x1b[201~");
+                            pane.write_input(&buf);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }

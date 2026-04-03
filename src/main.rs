@@ -10,7 +10,9 @@ mod workspace;
 use std::io;
 use std::time::Duration;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -27,14 +29,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = terminal::disable_raw_mode();
-        let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste);
         default_hook(info);
     }));
 
     // Terminal setup
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -65,7 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     crossterm::execute!(
         io::stdout(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
 
     Ok(())
