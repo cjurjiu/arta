@@ -11,7 +11,6 @@ use tui_term::widget::PseudoTerminal;
 
 #[derive(Debug)]
 pub enum PaneEvent {
-    Bell(String),
     Death(String),
 }
 
@@ -92,9 +91,6 @@ impl TerminalPane {
                 }
                 Ok(n) => {
                     let data = &buf[..n];
-                    if data.contains(&0x07) {
-                        let _ = bell_tx.send(PaneEvent::Bell(session_id.clone()));
-                    }
                     if let Ok(mut p) = parser.lock() {
                         p.process(data);
                     }

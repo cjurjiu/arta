@@ -275,12 +275,13 @@ impl Sidebar {
     }
 
     pub fn handle_mouse_click(&mut self, y: u16, workspace: &Workspace) -> SidebarAction {
-        if !self.focused || y < 4 {
+        if !self.focused || y < 5 {
             return SidebarAction::None;
         }
-        // Convert screen y to virtual line: screen_y = 4 + (vline - scroll_offset)
-        // so vline = (screen_y - 4) + scroll_offset
-        let click_vline = (y as usize - 4) + self.scroll_offset;
+        // Convert screen y to virtual line: screen_y = 5 + (vline - scroll_offset)
+        // so vline = (screen_y - 5) + scroll_offset
+        // Header is 5 lines: top separator, blank, "arta", blank, separator
+        let click_vline = (y as usize - 5) + self.scroll_offset;
         let mut vline: usize = 0;
         for (i, item) in self.items.iter().enumerate() {
             let h = Self::item_line_height(item);

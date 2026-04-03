@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::buffer::Buffer;
@@ -188,6 +188,8 @@ pub struct App {
     prefix_active: bool,
     bell_tx: mpsc::Sender<PaneEvent>,
     bell_rx: mpsc::Receiver<PaneEvent>,
+    last_bell_poll: Instant,
+    bell_notified: HashSet<String>,
     width: u16,
     height: u16,
     should_quit: bool,
@@ -279,6 +281,8 @@ impl App {
             prefix_active: false,
             bell_tx,
             bell_rx,
+            last_bell_poll: Instant::now(),
+            bell_notified: HashSet::new(),
             width: term_w,
             height: term_h,
             should_quit: false,
@@ -419,6 +423,7 @@ impl App {
             SidebarAction::SelectSession(id) => {
                 self.sidebar.set_selected(&id);
                 self.sidebar.clear_attention(&id);
+                self.bell_notified.remove(&id);
                 self.active_session = Some(id.clone());
                 self.workspace.set_active_session(Some(&id));
                 self.focus = Focus::Terminal;
@@ -782,16 +787,35 @@ impl App {
             }
         }
 
-        while let Ok(event) = self.bell_rx.try_recv() {
-            match event {
-                PaneEvent::Bell(session_id) => {
-                    if self.active_session.as_deref() != Some(&session_id) {
-                        self.sidebar.set_attention(&session_id);
-                        play_bell();
+        // Process death events from the PTY reader channel
+        while let Ok(PaneEvent::Death(session_id)) = self.bell_rx.try_recv() {
+            self.detach_pane(&session_id);
+        }
+
+        // Poll tmux for bell flags every 500ms
+        if self.last_bell_poll.elapsed() >= Duration::from_millis(500) {
+            self.last_bell_poll = Instant::now();
+            let flags = tmux::check_bell_flags();
+            for (session_id, has_bell) in flags {
+                if has_bell {
+                    if !self.bell_notified.contains(&session_id) {
+                        self.bell_notified.insert(session_id.clone());
+                        if self.active_session.as_deref() != Some(&session_id) {
+                            bell_log(&format!(
+                                "bell: session={} (notifying, active={:?})",
+                                session_id, self.active_session
+                            ));
+                            self.sidebar.set_attention(&session_id);
+                            play_bell();
+                        } else {
+                            bell_log(&format!(
+                                "bell: session={} (skipped, is active)",
+                                session_id
+                            ));
+                        }
                     }
-                }
-                PaneEvent::Death(session_id) => {
-                    self.detach_pane(&session_id);
+                } else {
+                    self.bell_notified.remove(&session_id);
                 }
             }
         }
@@ -1033,4 +1057,23 @@ fn play_bell() {
     let _ = std::process::Command::new("afplay")
         .args(["-v", "0.5", "/System/Library/Sounds/Tink.aiff"])
         .spawn();
+}
+
+fn bell_log(msg: &str) {
+    use std::io::Write;
+    let home = home_dir_string();
+    let dir = format!("{}/.local/share/arta", home);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = format!("{}/bell.log", dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = writeln!(f, "[{}] {}", secs, msg);
+    }
 }
