@@ -57,7 +57,7 @@ The binary is at `target/release/arta`. Add it to your PATH or copy it somewhere
 ### Requirements
 
 - macOS or Linux
-- Rust 1.70+ (via [rustup](https://rustup.rs/))
+- Rust 1.85+ (via [rustup](https://rustup.rs/))
 - tmux
 - A terminal emulator (iTerm2, Ghostty, Kitty, etc.)
 - Optional: a [Nerd Font](https://www.nerdfonts.com/) for icons
