@@ -28,7 +28,7 @@ pub enum SidebarAction {
 
 #[derive(Clone, Debug)]
 enum SidebarItem {
-    Project { name: String },
+    Project { name: String, session_count: usize },
     Session { id: String, project: String },
 }
 
@@ -100,7 +100,7 @@ impl Sidebar {
 
     pub fn set_cursor_to_project(&mut self, name: &str) {
         for (i, item) in self.items.iter().enumerate() {
-            if matches!(item, SidebarItem::Project { name: n } if n == name) {
+            if matches!(item, SidebarItem::Project { name: n, .. } if n == name) {
                 self.cursor = i;
                 self.ensure_cursor_visible();
                 return;
@@ -158,11 +158,13 @@ impl Sidebar {
     fn rebuild_items(&mut self, workspace: &Workspace) {
         self.items.clear();
         for p in &workspace.projects {
+            let sessions = workspace.sessions_for_project(&p.name);
             self.items.push(SidebarItem::Project {
                 name: p.name.clone(),
+                session_count: sessions.len(),
             });
             if self.expanded.contains(&p.name) {
-                for s in workspace.sessions_for_project(&p.name) {
+                for s in sessions {
                     self.items.push(SidebarItem::Session {
                         id: s.id.clone(),
                         project: p.name.clone(),
@@ -182,7 +184,7 @@ impl Sidebar {
 
     pub fn get_cursor_project(&self) -> Option<&str> {
         self.current_item().map(|item| match item {
-            SidebarItem::Project { name } => name.as_str(),
+            SidebarItem::Project { name, .. } => name.as_str(),
             SidebarItem::Session { project, .. } => project.as_str(),
         })
     }
@@ -247,22 +249,22 @@ impl Sidebar {
             KeyCode::Char('a') => SidebarAction::AddProject,
             KeyCode::Char('d') => self.with_current_item(|item| match item {
                 SidebarItem::Session { id, .. } => SidebarAction::CloseSession(id.clone()),
-                SidebarItem::Project { name } => SidebarAction::RemoveProject(name.clone()),
+                SidebarItem::Project { name, .. } => SidebarAction::RemoveProject(name.clone()),
             }),
             KeyCode::Char('n') => self.with_current_item(|item| match item {
-                SidebarItem::Project { name } => SidebarAction::NewSession(name.clone()),
+                SidebarItem::Project { name, .. } => SidebarAction::NewSession(name.clone()),
                 SidebarItem::Session { project, .. } => SidebarAction::NewSession(project.clone()),
             }),
             KeyCode::Char('r') => self.with_current_item(|item| match item {
-                SidebarItem::Project { name } => SidebarAction::RenameProject(name.clone()),
+                SidebarItem::Project { name, .. } => SidebarAction::RenameProject(name.clone()),
                 SidebarItem::Session { id, .. } => SidebarAction::RenameSession(id.clone()),
             }),
             KeyCode::Char('o') => self.with_current_item(|item| match item {
-                SidebarItem::Project { name } => SidebarAction::OpenIde(name.clone()),
+                SidebarItem::Project { name, .. } => SidebarAction::OpenIde(name.clone()),
                 SidebarItem::Session { project, .. } => SidebarAction::OpenIde(project.clone()),
             }),
             KeyCode::Char('c') => self.with_current_item(|item| match item {
-                SidebarItem::Project { name } => SidebarAction::ConfigureProject(name.clone()),
+                SidebarItem::Project { name, .. } => SidebarAction::ConfigureProject(name.clone()),
                 SidebarItem::Session { project, .. } => {
                     SidebarAction::ConfigureProject(project.clone())
                 }
@@ -310,7 +312,7 @@ impl Sidebar {
     }
 
     fn handle_toggle(&mut self, workspace: &Workspace) {
-        if let Some(SidebarItem::Project { name }) = self.current_item().cloned() {
+        if let Some(SidebarItem::Project { name, .. }) = self.current_item().cloned() {
             if !self.expanded.remove(&name) {
                 self.expanded.insert(name);
             }
@@ -318,7 +320,7 @@ impl Sidebar {
         }
     }
 
-    pub fn render(&self, area: Rect, buf: &mut Buffer, workspace: &Workspace) {
+    pub fn render(&self, area: Rect, buf: &mut Buffer, _workspace: &Workspace) {
         let dim = Style::default().add_modifier(Modifier::DIM);
         let bold = Style::default().add_modifier(Modifier::BOLD);
         let sep_style = if self.focused {
@@ -421,7 +423,7 @@ impl Sidebar {
                 }
 
                 match item {
-                    SidebarItem::Project { name } => {
+                    SidebarItem::Project { name, session_count } => {
                         let arrow = if self.expanded.contains(name) {
                             if self.nerd_font {
                                 "\u{f115}"
@@ -434,7 +436,7 @@ impl Sidebar {
                             "\u{25b6}"
                         };
 
-                        let count = workspace.sessions_for_project(name).len();
+                        let count = *session_count;
 
                         // Blank line (vline), name line (vline+1)
                         let name_vline = vline + 1;
@@ -621,8 +623,24 @@ impl Sidebar {
 }
 
 fn detect_nerd_font() -> bool {
-    Command::new("fc-list")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Nerd Font"))
-        .unwrap_or(false)
+    if std::env::var("ARTA_NERD_FONT").map_or(false, |v| v == "1") {
+        return true;
+    }
+    // fc-list works on Linux
+    if let Ok(o) = Command::new("fc-list").output() {
+        if String::from_utf8_lossy(&o.stdout).contains("Nerd Font") {
+            return true;
+        }
+    }
+    // macOS: check system and user font directories
+    for dir in &["/Library/Fonts", &format!("{}/Library/Fonts", dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default())] {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().contains("Nerd") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }

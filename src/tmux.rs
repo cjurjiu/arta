@@ -38,6 +38,21 @@ pub fn create_session(name: &str, dir: &str) {
         .output();
 }
 
+/// Apply bell-related settings to an existing session.
+/// Must be called on attach (not just create) because the user's global
+/// tmux.conf may override session-level settings on restart.
+pub fn apply_bell_settings(name: &str) {
+    let _ = Command::new("tmux")
+        .args(["set-window-option", "-t", name, "monitor-bell", "on"])
+        .output();
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", name, "bell-action", "any"])
+        .output();
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", name, "visual-bell", "off"])
+        .output();
+}
+
 pub fn kill_session(name: &str) {
     let _ = Command::new("tmux")
         .args(["kill-session", "-t", name])

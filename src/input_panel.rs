@@ -400,12 +400,7 @@ impl InputPanel {
     }
 
     fn expand_path(&self, path: &str) -> String {
-        if let Some(rest) = path.strip_prefix('~') {
-            if let Some(home) = dirs::home_dir() {
-                return format!("{}{}", home.display(), rest);
-            }
-        }
-        path.to_string()
+        crate::app::expand_tilde(path)
     }
 
     fn max_visible_entries(&self) -> usize {

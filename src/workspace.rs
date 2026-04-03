@@ -23,6 +23,8 @@ pub struct Workspace {
     pub sessions: Vec<Session>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_session: Option<String>,
+    #[serde(default)]
+    next_session_id: u64,
     #[serde(skip)]
     file_path: PathBuf,
 }
@@ -49,6 +51,7 @@ impl Workspace {
             projects: Vec::new(),
             sessions: Vec::new(),
             active_session: None,
+            next_session_id: 0,
             file_path: dir.join("workspace.json"),
         }
     }
@@ -63,6 +66,7 @@ impl Workspace {
         self.projects = loaded.projects;
         self.sessions = loaded.sessions;
         self.active_session = loaded.active_session;
+        self.next_session_id = loaded.next_session_id;
         Ok(())
     }
 
@@ -115,13 +119,9 @@ impl Workspace {
     }
 
     pub fn create_session(&mut self, project_name: &str) -> Option<&Session> {
-        let count = self
-            .sessions
-            .iter()
-            .filter(|s| s.project == project_name)
-            .count();
+        self.next_session_id += 1;
         let session = Session {
-            id: format!("{}-{}", project_name, count + 1),
+            id: format!("{}-{}", project_name, self.next_session_id),
             project: project_name.to_string(),
             created: chrono_now(),
         };
@@ -135,7 +135,10 @@ impl Workspace {
         let _ = self.save();
     }
 
-    pub fn rename_session(&mut self, old_id: &str, new_id: &str) {
+    pub fn rename_session(&mut self, old_id: &str, new_id: &str) -> bool {
+        if self.sessions.iter().any(|s| s.id == new_id && s.id != old_id) {
+            return false;
+        }
         for s in &mut self.sessions {
             if s.id == old_id {
                 s.id = new_id.to_string();
@@ -143,6 +146,7 @@ impl Workspace {
             }
         }
         let _ = self.save();
+        true
     }
 
     pub fn swap_session_in_project(&mut self, id: &str, direction: i32) {
@@ -198,7 +202,11 @@ impl Workspace {
     }
 
     pub fn set_active_session(&mut self, id: Option<&str>) {
-        self.active_session = id.map(|s| s.to_string());
+        let new = id.map(|s| s.to_string());
+        if self.active_session == new {
+            return;
+        }
+        self.active_session = new;
         let _ = self.save();
     }
 
@@ -289,6 +297,7 @@ mod tests {
             projects: Vec::new(),
             sessions: Vec::new(),
             active_session: None,
+            next_session_id: 0,
             file_path: dir.join("workspace.json"),
         }
     }

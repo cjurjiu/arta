@@ -221,6 +221,9 @@ impl App {
         let mut panes = HashMap::new();
         for session in &workspace.sessions {
             let tmux_name = tmux::session_name(&session.id);
+            // Re-apply bell settings on every attach (user's global tmux.conf
+            // may override session-level settings between restarts)
+            tmux::apply_bell_settings(&tmux_name);
             if let Ok(pane) = TerminalPane::new(
                 session.id.clone(),
                 &tmux_name,
@@ -517,7 +520,7 @@ impl App {
                     .spawn()
                     .and_then(|mut child| {
                         use std::io::Write;
-                        if let Some(stdin) = child.stdin.as_mut() {
+                        if let Some(mut stdin) = child.stdin.take() {
                             stdin.write_all(url.as_bytes())?;
                         }
                         child.wait()
@@ -625,21 +628,27 @@ impl App {
                 let new_id = workspace::sanitize_name(&value);
                 if let Some(old_id) = context {
                     if !new_id.is_empty() && new_id != old_id {
-                        tmux::rename_session(
-                            &tmux::session_name(&old_id),
-                            &tmux::session_name(&new_id),
-                        );
-                        self.workspace.rename_session(&old_id, &new_id);
+                        if !self.workspace.rename_session(&old_id, &new_id) {
+                            self.timed_message = Some((
+                                format!("Session '{}' already exists", new_id),
+                                Instant::now(),
+                            ));
+                        } else {
+                            tmux::rename_session(
+                                &tmux::session_name(&old_id),
+                                &tmux::session_name(&new_id),
+                            );
 
-                        if let Some(pane) = self.panes.remove(&old_id) {
-                            self.panes.insert(new_id.clone(), pane);
-                        }
+                            if let Some(pane) = self.panes.remove(&old_id) {
+                                self.panes.insert(new_id.clone(), pane);
+                            }
 
-                        if self.active_session.as_deref() == Some(&old_id) {
-                            self.active_session = Some(new_id.clone());
+                            if self.active_session.as_deref() == Some(&old_id) {
+                                self.active_session = Some(new_id.clone());
+                            }
+                            self.sidebar.set_selected(&new_id);
+                            self.sidebar.refresh(&self.workspace);
                         }
-                        self.sidebar.set_selected(&new_id);
-                        self.sidebar.refresh(&self.workspace);
                     }
                 }
             }
@@ -787,13 +796,31 @@ impl App {
             }
         }
 
-        // Process death events from the PTY reader channel
-        while let Ok(PaneEvent::Death(session_id)) = self.bell_rx.try_recv() {
-            self.detach_pane(&session_id);
+        // Process bell and death events from the PTY reader channel
+        while let Ok(event) = self.bell_rx.try_recv() {
+            match event {
+                PaneEvent::Bell(session_id) => {
+                    if self.active_session.as_deref() != Some(&session_id) {
+                        bell_log(&format!(
+                            "bell(pty): session={} (notifying)",
+                            session_id
+                        ));
+                        self.sidebar.set_attention(&session_id);
+                        play_bell();
+                    }
+                }
+                PaneEvent::Death(session_id) => {
+                    self.detach_pane(&session_id);
+                    self.bell_notified.remove(&session_id);
+                    self.sidebar.clear_attention(&session_id);
+                    self.workspace.remove_session(&session_id);
+                    self.sidebar.refresh(&self.workspace);
+                }
+            }
         }
 
-        // Poll tmux for bell flags every 500ms
-        if self.last_bell_poll.elapsed() >= Duration::from_millis(500) {
+        // Poll tmux for bell flags every 500ms (skip if no sessions)
+        if !self.panes.is_empty() && self.last_bell_poll.elapsed() >= Duration::from_millis(500) {
             self.last_bell_poll = Instant::now();
             let flags = tmux::check_bell_flags();
             for (session_id, has_bell) in flags {
@@ -1046,7 +1073,7 @@ fn home_dir_string() -> String {
         .unwrap_or_default()
 }
 
-fn expand_tilde(path: &str) -> String {
+pub fn expand_tilde(path: &str) -> String {
     match path.strip_prefix('~') {
         Some(rest) => format!("{}{}", home_dir_string(), rest),
         None => path.to_string(),
@@ -1054,9 +1081,15 @@ fn expand_tilde(path: &str) -> String {
 }
 
 fn play_bell() {
-    let _ = std::process::Command::new("afplay")
+    if let Ok(child) = std::process::Command::new("afplay")
         .args(["-v", "0.5", "/System/Library/Sounds/Tink.aiff"])
-        .spawn();
+        .spawn()
+    {
+        std::thread::spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        });
+    }
 }
 
 fn bell_log(msg: &str) {
