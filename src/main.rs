@@ -23,6 +23,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Panic hook: restore terminal before printing panic message
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = terminal::disable_raw_mode();
+        let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        default_hook(info);
+    }));
+
     // Terminal setup
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();

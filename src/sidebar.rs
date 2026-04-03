@@ -34,6 +34,7 @@ enum SidebarItem {
 pub struct Sidebar {
     items: Vec<SidebarItem>,
     cursor: usize,
+    scroll_offset: usize,
     expanded: HashSet<String>,
     selected: Option<String>,
     attention: HashSet<String>,
@@ -51,6 +52,7 @@ impl Sidebar {
         let mut s = Sidebar {
             items: Vec::new(),
             cursor: 0,
+            scroll_offset: 0,
             expanded,
             selected: None,
             attention: HashSet::new(),
@@ -97,6 +99,7 @@ impl Sidebar {
         for (i, item) in self.items.iter().enumerate() {
             if matches!(item, SidebarItem::Project { name: n } if n == name) {
                 self.cursor = i;
+                self.ensure_cursor_visible();
                 return;
             }
         }
@@ -106,8 +109,46 @@ impl Sidebar {
         for (i, item) in self.items.iter().enumerate() {
             if matches!(item, SidebarItem::Session { id: sid, .. } if sid == id) {
                 self.cursor = i;
+                self.ensure_cursor_visible();
                 return;
             }
+        }
+    }
+
+    fn item_line_height(item: &SidebarItem) -> usize {
+        match item {
+            SidebarItem::Project { .. } => 2,
+            SidebarItem::Session { .. } => 1,
+        }
+    }
+
+    fn item_start_line(&self, idx: usize) -> usize {
+        self.items[..idx]
+            .iter()
+            .map(Self::item_line_height)
+            .sum()
+    }
+
+    /// Header: 4 lines, footer: 7 lines
+    fn visible_item_lines(&self) -> usize {
+        (self.height as usize).saturating_sub(11)
+    }
+
+    fn ensure_cursor_visible(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        let visible = self.visible_item_lines();
+        if visible == 0 {
+            return;
+        }
+        let cursor_start = self.item_start_line(self.cursor);
+        let cursor_end = cursor_start + Self::item_line_height(&self.items[self.cursor]);
+        if cursor_start < self.scroll_offset {
+            self.scroll_offset = cursor_start;
+        }
+        if cursor_end > self.scroll_offset + visible {
+            self.scroll_offset = cursor_end.saturating_sub(visible);
         }
     }
 
@@ -129,6 +170,7 @@ impl Sidebar {
         if self.cursor >= self.items.len() && !self.items.is_empty() {
             self.cursor = self.items.len() - 1;
         }
+        self.ensure_cursor_visible();
     }
 
     fn current_item(&self) -> Option<&SidebarItem> {
@@ -158,12 +200,14 @@ impl Sidebar {
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.cursor < self.items.len().saturating_sub(1) {
                     self.cursor += 1;
+                    self.ensure_cursor_visible();
                 }
                 SidebarAction::None
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if self.cursor > 0 {
                     self.cursor -= 1;
+                    self.ensure_cursor_visible();
                 }
                 SidebarAction::None
             }
@@ -222,19 +266,21 @@ impl Sidebar {
     }
 
     pub fn handle_mouse_click(&mut self, y: u16, workspace: &Workspace) -> SidebarAction {
-        if !self.focused {
+        if !self.focused || y < 4 {
             return SidebarAction::None;
         }
-        let mut line: u16 = 4;
+        // Convert screen y to virtual line: screen_y = 4 + (vline - scroll_offset)
+        // so vline = (screen_y - 4) + scroll_offset
+        let click_vline = (y as usize - 4) + self.scroll_offset;
+        let mut vline: usize = 0;
         for (i, item) in self.items.iter().enumerate() {
-            match item {
-                SidebarItem::Project { .. } => line += 2,
-                SidebarItem::Session { .. } => line += 1,
-            }
-            if line > y && y > 0 {
+            let h = Self::item_line_height(item);
+            if click_vline < vline + h {
                 self.cursor = i;
+                self.ensure_cursor_visible();
                 return self.handle_action(workspace);
             }
+            vline += h;
         }
         SidebarAction::None
     }
@@ -314,9 +360,14 @@ impl Sidebar {
             y += 1;
         }
 
+        // Items area
+        let items_top_y = y;
+        let footer_y = (area.y + area.height).saturating_sub(7);
+        let visible_lines = (footer_y as usize).saturating_sub(items_top_y as usize);
+
         if self.items.is_empty() {
-            y += 1;
-            if y < area.y + area.height {
+            if y + 1 < footer_y {
+                y += 1;
                 buf.set_line(
                     area.x,
                     y,
@@ -325,7 +376,7 @@ impl Sidebar {
                 );
                 y += 1;
             }
-            if y < area.y + area.height {
+            if y < footer_y {
                 buf.set_line(
                     area.x,
                     y,
@@ -334,7 +385,20 @@ impl Sidebar {
                 );
             }
         } else {
+            let mut vline: usize = 0;
             for (idx, item) in self.items.iter().enumerate() {
+                let item_h = Self::item_line_height(item);
+
+                // Skip items fully above scroll window
+                if vline + item_h <= self.scroll_offset {
+                    vline += item_h;
+                    continue;
+                }
+                // Stop if past visible area
+                if vline >= self.scroll_offset + visible_lines {
+                    break;
+                }
+
                 match item {
                     SidebarItem::Project { name } => {
                         let arrow = if self.expanded.contains(name) {
@@ -351,88 +415,94 @@ impl Sidebar {
 
                         let count = workspace.sessions_for_project(name).len();
 
-                        y += 1;
-                        if y >= area.y + area.height {
-                            break;
+                        // Blank line (vline), name line (vline+1)
+                        let name_vline = vline + 1;
+                        if name_vline >= self.scroll_offset
+                            && name_vline < self.scroll_offset + visible_lines
+                        {
+                            let sy =
+                                items_top_y + (name_vline - self.scroll_offset) as u16;
+                            let mut spans =
+                                vec![Span::raw(format!(" {} {}", arrow, name))];
+                            if count > 0 {
+                                spans.push(Span::styled(format!(" ({})", count), dim));
+                            }
+                            let mut style = bold;
+                            if self.focused && self.cursor == idx {
+                                style = style.add_modifier(Modifier::REVERSED);
+                            }
+                            buf.set_line(
+                                area.x,
+                                sy,
+                                &Line::from(spans).style(style),
+                                area.width,
+                            );
                         }
-
-                        let mut spans = vec![Span::raw(format!(" {} {}", arrow, name))];
-                        if count > 0 {
-                            spans.push(Span::styled(format!(" ({})", count), dim));
-                        }
-
-                        let mut style = bold;
-                        if self.focused && self.cursor == idx {
-                            style = style.add_modifier(Modifier::REVERSED);
-                        }
-
-                        buf.set_line(area.x, y, &Line::from(spans).style(style), area.width);
-                        y += 1;
                     }
                     SidebarItem::Session { id, .. } => {
-                        if y >= area.y + area.height {
-                            break;
-                        }
+                        if vline >= self.scroll_offset
+                            && vline < self.scroll_offset + visible_lines
+                        {
+                            let sy = items_top_y + (vline - self.scroll_offset) as u16;
 
-                        let is_selected = self.selected.as_deref() == Some(id.as_str());
-                        let has_attention = self.attention.contains(id);
+                            let is_selected =
+                                self.selected.as_deref() == Some(id.as_str());
+                            let has_attention = self.attention.contains(id);
 
-                        let icon = if has_attention {
-                            if self.nerd_font {
-                                "\u{f0f3}"
+                            let icon = if has_attention {
+                                if self.nerd_font {
+                                    "\u{f0f3}"
+                                } else {
+                                    "*"
+                                }
+                            } else if is_selected {
+                                if self.nerd_font {
+                                    "\u{f120}"
+                                } else {
+                                    "\u{25cf}"
+                                }
+                            } else if self.nerd_font {
+                                "\u{f489}"
                             } else {
-                                "*"
-                            }
-                        } else if is_selected {
-                            if self.nerd_font {
-                                "\u{f120}"
+                                "\u{25cb}"
+                            };
+
+                            let color = if has_attention {
+                                Color::Rgb(0xFF, 0x6C, 0x6B)
+                            } else if is_selected {
+                                Color::Rgb(0x51, 0xAF, 0xEF)
                             } else {
-                                "\u{25cf}"
+                                Color::Rgb(0xA9, 0xA1, 0xE1)
+                            };
+
+                            let mut style = Style::default().fg(color);
+                            if is_selected {
+                                style = style
+                                    .add_modifier(Modifier::BOLD)
+                                    .bg(Color::Rgb(0x1E, 0x2A, 0x3A));
                             }
-                        } else if self.nerd_font {
-                            "\u{f489}"
-                        } else {
-                            "\u{25cb}"
-                        };
+                            if self.focused && self.cursor == idx {
+                                style = style.add_modifier(Modifier::REVERSED);
+                            }
 
-                        let color = if has_attention {
-                            Color::Rgb(0xFF, 0x6C, 0x6B)
-                        } else if is_selected {
-                            Color::Rgb(0x51, 0xAF, 0xEF)
-                        } else {
-                            Color::Rgb(0xA9, 0xA1, 0xE1)
-                        };
-
-                        let mut style = Style::default().fg(color);
-                        if is_selected {
-                            style = style
-                                .add_modifier(Modifier::BOLD)
-                                .bg(Color::Rgb(0x1E, 0x2A, 0x3A));
+                            let text = format!("   {} {}", icon, id);
+                            let padded = format!("{:<width$}", text, width = w);
+                            buf.set_line(
+                                area.x,
+                                sy,
+                                &Line::from(Span::styled(padded, style)),
+                                area.width,
+                            );
                         }
-                        if self.focused && self.cursor == idx {
-                            style = style.add_modifier(Modifier::REVERSED);
-                        }
-
-                        // Fill the full line width so the background extends
-                        let text = format!("   {} {}", icon, id);
-                        let padded = format!("{:<width$}", text, width = w);
-                        buf.set_line(
-                            area.x,
-                            y,
-                            &Line::from(Span::styled(padded, style)),
-                            area.width,
-                        );
-                        y += 1;
                     }
                 }
+
+                vline += item_h;
             }
         }
 
         // Footer
-        let footer_y = area.y + area.height - 7;
-        if footer_y > y {
-            y = footer_y;
-        }
+        y = (area.y + area.height).saturating_sub(7);
 
         if y < area.y + area.height {
             let sep = "\u{2500}".repeat(w.saturating_sub(2));
