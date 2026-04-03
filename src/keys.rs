@@ -1,5 +1,21 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+/// Convert crossterm modifier flags to xterm modifier parameter.
+/// xterm uses: 2=Shift, 3=Alt, 4=Shift+Alt, 5=Ctrl, 6=Ctrl+Shift, 7=Ctrl+Alt, 8=Ctrl+Shift+Alt
+fn modifier_param(modifiers: KeyModifiers) -> u8 {
+    let mut m: u8 = 1;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        m += 1;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        m += 2;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        m += 4;
+    }
+    m
+}
+
 pub fn key_event_to_bytes(event: &KeyEvent) -> Option<Vec<u8>> {
     // Ctrl+letter → control character
     if event.modifiers.contains(KeyModifiers::CONTROL) {
@@ -25,15 +41,40 @@ pub fn key_event_to_bytes(event: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Enter => Some(vec![b'\r']),
         KeyCode::Backspace => Some(vec![0x7f]),
         KeyCode::Tab => Some(vec![b'\t']),
+        KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
         KeyCode::Esc => Some(vec![0x1b]),
 
-        // Arrow keys
+        // Modified arrow keys (Ctrl, Alt, Ctrl+Shift, etc.)
+        KeyCode::Up | KeyCode::Down | KeyCode::Right | KeyCode::Left
+            if event.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            let dir = match event.code {
+                KeyCode::Up => 'A',
+                KeyCode::Down => 'B',
+                KeyCode::Right => 'C',
+                _ => 'D',
+            };
+            let m = modifier_param(event.modifiers);
+            Some(format!("\x1b[1;{}{}", m, dir).into_bytes())
+        }
+
+        // Arrow keys (plain)
         KeyCode::Up => Some(b"\x1b[A".to_vec()),
         KeyCode::Down => Some(b"\x1b[B".to_vec()),
         KeyCode::Right => Some(b"\x1b[C".to_vec()),
         KeyCode::Left => Some(b"\x1b[D".to_vec()),
 
-        // Navigation
+        // Modified navigation keys
+        KeyCode::Home if event.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            let m = modifier_param(event.modifiers);
+            Some(format!("\x1b[1;{}H", m).into_bytes())
+        }
+        KeyCode::End if event.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            let m = modifier_param(event.modifiers);
+            Some(format!("\x1b[1;{}F", m).into_bytes())
+        }
+
+        // Navigation (plain)
         KeyCode::Home => Some(b"\x1b[H".to_vec()),
         KeyCode::End => Some(b"\x1b[F".to_vec()),
         KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
