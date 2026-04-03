@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::mpsc;
+use std::time::Instant;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::buffer::Buffer;
@@ -182,6 +183,7 @@ pub struct App {
     pending_path: Option<String>,
     pending_name: Option<String>,
     status_message: Option<String>,
+    timed_message: Option<(String, Instant)>,
     config_menu: Option<ConfigMenu>,
     prefix_active: bool,
     bell_tx: mpsc::Sender<PaneEvent>,
@@ -272,6 +274,7 @@ impl App {
             pending_path: None,
             pending_name: None,
             status_message: None,
+            timed_message: None,
             config_menu: None,
             prefix_active: false,
             bell_tx,
@@ -499,6 +502,24 @@ impl App {
                 self.config_menu = Some(ConfigMenu::new(name));
                 self.focus = Focus::Input;
                 self.sidebar.set_focused(false);
+            }
+            SidebarAction::CopyGithubLink => {
+                let url = "https://github.com/cjurjiu/arta";
+                let copied = std::process::Command::new("pbcopy")
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .and_then(|mut child| {
+                        use std::io::Write;
+                        if let Some(stdin) = child.stdin.as_mut() {
+                            stdin.write_all(url.as_bytes())?;
+                        }
+                        child.wait()
+                    })
+                    .is_ok();
+                if copied {
+                    self.timed_message =
+                        Some(("github link copied to clipboard".to_string(), Instant::now()));
+                }
             }
             SidebarAction::FocusTerminal => {
                 if self.active_session.is_some() {
@@ -752,6 +773,13 @@ impl App {
     }
 
     pub fn check_pane_events(&mut self) {
+        // Clear expired timed messages
+        if let Some((_, created)) = &self.timed_message {
+            if created.elapsed() >= std::time::Duration::from_secs(3) {
+                self.timed_message = None;
+            }
+        }
+
         while let Ok(event) = self.bell_rx.try_recv() {
             match event {
                 PaneEvent::Bell(session_id) => {
@@ -847,53 +875,68 @@ impl App {
                 );
             }
 
-            // Version bar (first line below focus border, right-aligned)
-            let version_y = main_height.saturating_sub(2);
-            if version_y > term_content_y + term_content_height {
-                let icon_style = Style::default()
-                    .fg(Color::Rgb(0xEC, 0xBE, 0x7B))
-                    .add_modifier(Modifier::BOLD);
-                let name_style = Style::default()
-                    .fg(Color::Rgb(0xFF, 0x6C, 0x6B))
-                    .add_modifier(Modifier::BOLD);
-                let version_style = Style::default().fg(Color::Rgb(0x88, 0x88, 0x88));
-                let icon = if self.sidebar.nerd_font() {
-                    "\u{f03e}  "
-                } else {
-                    "\u{1f5bc}\u{fe0f}  "
-                };
-                let version_text = format!("v{}", env!("CARGO_PKG_VERSION"));
-                let bar = Line::from(vec![
-                    Span::styled(icon, icon_style),
-                    Span::styled("a r t a", name_style),
-                    Span::styled(" - ", version_style),
-                    Span::styled(version_text, version_style),
-                    Span::raw(" "),
-                ]);
-                // Right-align
-                let bar_width: u16 = 22;
-                let bar_x = right_x + right_width.saturating_sub(bar_width);
-                frame.buffer_mut().set_line(bar_x, version_y, &bar, bar_width);
-            }
-
-            // Status message line (second line below focus border)
-            if let Some(msg) = &self.status_message {
-                let status_y = main_height.saturating_sub(1);
-                if status_y > term_content_y + term_content_height {
-                    let status_style = Style::default()
-                        .fg(Color::Rgb(0xFF, 0x6C, 0x6B))
-                        .add_modifier(Modifier::DIM);
-                    frame.buffer_mut().set_line(
-                        right_x,
-                        status_y,
-                        &Line::from(Span::styled(format!(" {}", msg), status_style)),
-                        right_width,
-                    );
-                }
-            }
         } else {
             let right_area = Rect::new(right_x, 0, right_width, main_height);
             welcome::render_welcome(right_area, frame.buffer_mut());
+        }
+
+        // Version bar (always visible, right-aligned on second-to-last line)
+        let version_y = main_height.saturating_sub(2);
+        if version_y > 0 {
+            let icon_style = Style::default()
+                .fg(Color::Rgb(0xEC, 0xBE, 0x7B))
+                .add_modifier(Modifier::BOLD);
+            let name_style = Style::default()
+                .fg(Color::Rgb(0xFF, 0x6C, 0x6B))
+                .add_modifier(Modifier::BOLD);
+            let gray = Style::default().fg(Color::Rgb(0x88, 0x88, 0x88));
+            let icon = if self.sidebar.nerd_font() {
+                "\u{f03e}  "
+            } else {
+                "\u{1f5bc}\u{fe0f}  "
+            };
+            let version_text = format!("v{}", env!("CARGO_PKG_VERSION"));
+            let bar = Line::from(vec![
+                Span::styled(icon, icon_style),
+                Span::styled("a r t a", name_style),
+                Span::styled(" - ", gray),
+                Span::styled(version_text, gray),
+                Span::styled(" | ", gray),
+                Span::styled("g", Style::default().fg(Color::Rgb(0x88, 0x88, 0x88)).add_modifier(Modifier::BOLD)),
+                Span::styled(" - github ", gray),
+            ]);
+            let bar_width: u16 = 36;
+            let bar_x = right_x + right_width.saturating_sub(bar_width);
+            frame.buffer_mut().set_line(bar_x, version_y, &bar, bar_width);
+
+            // Timed message (left side of same row)
+            if let Some((msg, _)) = &self.timed_message {
+                let msg_style = Style::default()
+                    .fg(Color::Rgb(0x98, 0xBE, 0x65))
+                    .add_modifier(Modifier::DIM);
+                frame.buffer_mut().set_line(
+                    right_x,
+                    version_y,
+                    &Line::from(Span::styled(format!(" {}", msg), msg_style)),
+                    right_width.saturating_sub(bar_width),
+                );
+            }
+        }
+
+        // Status message line (last line of right pane)
+        if let Some(msg) = &self.status_message {
+            let status_y = main_height.saturating_sub(1);
+            if status_y > 0 {
+                let status_style = Style::default()
+                    .fg(Color::Rgb(0xFF, 0x6C, 0x6B))
+                    .add_modifier(Modifier::DIM);
+                frame.buffer_mut().set_line(
+                    right_x,
+                    status_y,
+                    &Line::from(Span::styled(format!(" {}", msg), status_style)),
+                    right_width,
+                );
+            }
         }
 
         // Input panel

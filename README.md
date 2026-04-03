@@ -85,6 +85,7 @@ arta
 | `j` / `k` | Navigate up/down |
 | `tab` | Expand/collapse project |
 | `enter` | Select session |
+| `g` | Copy GitHub link to clipboard |
 | `l` | Focus terminal |
 | `q` | Quit (sessions survive) |
 | `Q` | Clean exit (kill all sessions) |

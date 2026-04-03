@@ -20,6 +20,7 @@ pub enum SidebarAction {
     MoveSession(String, i32),
     OpenIde(String),
     ConfigureProject(String),
+    CopyGithubLink,
     FocusTerminal,
     Quit,
     CleanExit,
@@ -252,6 +253,7 @@ impl Sidebar {
                     SidebarAction::ConfigureProject(project.clone())
                 }
             }),
+            KeyCode::Char('g') => SidebarAction::CopyGithubLink,
             KeyCode::Char('q') => SidebarAction::Quit,
             KeyCode::Char('Q') => SidebarAction::CleanExit,
             _ => SidebarAction::None,
