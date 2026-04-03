@@ -8,22 +8,21 @@ Organize projects in a sidebar, manage multiple tmux-backed sessions, and switch
 
 ```
  ┌────────────────┬─────────────────────────────────────────────┐
- │   🖼 a r t a   │  $ ~/projects/my-app                        │
- │ -------------- │  > claude                                   │
- │ ▼ my-app (2)   │  ╭─────────────────────────────────────╮    │
- │   session-1    │  │ claude> fix the login bug           │    │
- │   session-2 *  │  │ ...                                 │    │
- │ ▶ api-svc      │  ╰─────────────────────────────────────╯    │
- │ ▼ fe-web1 (1)  │  $ npm test                                 │
- │   session-1 *  │  ✓ 42 tests passed                          │
- │                │                                             │
- │                │  $ █                                        │
- │ ---------------│                                             │
- │ a add  D rm    │                                             │
- │ n thread  d del│                                             │
- │ r rename J/K mv│                                             │
- │ o open  c conf │                                             │
- │ q quit  Q clean│ [] 1 claude * - 2 zsh       2026-04-02 18:27│
+ │ -------------- │ ─────────────────────────────────────────── │
+ │                │  $ ~/projects/my-app                        │
+ │   🖼 a r t a   │  > claude                                   │
+ │                │  ╭─────────────────────────────────────╮    │
+ │ -------------- │  │ claude> fix the login bug           │    │
+ │ ▼ my-app (2)   │  │ ...                                 │    │
+ │   session-1    │  ╰─────────────────────────────────────╯    │
+ │   session-2 *  │  $ npm test                                 │
+ │ ▶ api-svc      │  ✓ 42 tests passed                          │
+ │ ▼ fe-web1 (1)  │                                             │
+ │   session-1 *  │  $ █                                        │
+ │                │ focused ─────────────────────────────────── │
+ │ ---------------│               interactive | v0.1.0 | MIT   │
+ │ ctrl+space run │ [] 1 claude * - 2 zsh       2026-04-02 18:27│
+ │ J/K reorder    │                                             │
  └────────────────┴─────────────────────────────────────────────┘
       sidebar          tmux session (full PTY)
 ```
@@ -70,37 +69,36 @@ The binary is at `target/release/arta`. Add it to your PATH or copy it somewhere
 arta
 ```
 
-### Sidebar keybindings
-
-| Key | Action |
-|-----|--------|
-| `a` | Add project (path → name → open command) |
-| `D` | Remove project (+ kills all sessions) |
-| `n` | New session |
-| `d` | Close session (kills tmux) |
-| `r` | Rename project or session |
-| `o` | Open IDE (runs configured open command) |
-| `c` | Configure project (rename, path, open command) |
-| `J` / `K` | Reorder project or session |
-| `j` / `k` | Navigate up/down |
-| `tab` | Expand/collapse project |
-| `enter` | Select session |
-| `g` | Copy GitHub link to clipboard |
-| `l` | Focus terminal |
-| `q` | Quit (sessions survive) |
-| `Q` | Clean exit (kill all sessions) |
-
 ### Prefix key (`Ctrl+Space`)
 
-`Ctrl+Space` is the prefix key. Press it, then press a command:
+`Ctrl+Space` is the prefix key. Press it from **any focus**, then press a command. The sidebar footer shows available commands while the prefix is active.
 
 | After `Ctrl+Space` | Action |
 |-----|--------|
-| `Left` | Focus sidebar |
-| `Right` | Focus terminal |
-| Any sidebar key | Executes that command (e.g., `a`, `n`, `d`, `q`) |
+| `←` / `→` | Change focus (sidebar / terminal) |
+| `n` | New session |
+| `o` | Open IDE (runs configured open command) |
+| `r` | Rename project or session |
+| `a` | Add project (path → name → open command) |
+| `c` | Configure project (rename, path, open command) |
+| `d` | Delete selected item (project or session) |
+| `g` | Copy GitHub link to clipboard |
+| `q` | Quit (sessions survive) |
+| `Q` | Clean exit (kill all sessions) |
 
-When the sidebar is focused, all keys work directly without the prefix. The prefix is how you access sidebar commands from the terminal.
+The status bar shows `interactive` or `run` mode. When `Ctrl+Space` is pressed, it switches to `run` mode with "awaiting command..." until a key is pressed.
+
+### Sidebar-only keys
+
+These keys work only when the sidebar is focused (no prefix needed):
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate up/down |
+| `J` / `K` | Reorder project or session |
+| `tab` | Expand/collapse project |
+| `enter` | Select session |
+| `l` | Focus terminal |
 
 You can also click on either pane to switch focus.
 

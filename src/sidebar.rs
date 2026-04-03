@@ -41,6 +41,7 @@ pub struct Sidebar {
     attention: HashSet<String>,
     nerd_font: bool,
     focused: bool,
+    prefix_active: bool,
     height: u16,
 }
 
@@ -59,6 +60,7 @@ impl Sidebar {
             attention: HashSet::new(),
             nerd_font: detect_nerd_font(),
             focused: true,
+            prefix_active: false,
             height: 24,
         };
         s.rebuild_items(workspace);
@@ -73,8 +75,8 @@ impl Sidebar {
         self.focused = f;
     }
 
-    pub fn nerd_font(&self) -> bool {
-        self.nerd_font
+    pub fn set_prefix_active(&mut self, active: bool) {
+        self.prefix_active = active;
     }
 
     pub fn set_selected(&mut self, id: &str) {
@@ -130,9 +132,9 @@ impl Sidebar {
             .sum()
     }
 
-    /// Header: 4 lines, footer: 7 lines
+    /// Header: 5 lines, footer: 7 lines (fixed, keeps items area consistent)
     fn visible_item_lines(&self) -> usize {
-        (self.height as usize).saturating_sub(11)
+        (self.height as usize).saturating_sub(12)
     }
 
     fn ensure_cursor_visible(&mut self) {
@@ -193,6 +195,8 @@ impl Sidebar {
         }
     }
 
+    /// Handles navigation-only keys (sidebar must be focused).
+    /// Command keys (a, d, n, r, o, c, g, q, Q) require Ctrl+Space prefix.
     pub fn handle_key(&mut self, key: &KeyEvent, workspace: &Workspace) -> SidebarAction {
         if !self.focused {
             return SidebarAction::None;
@@ -212,29 +216,6 @@ impl Sidebar {
                 }
                 SidebarAction::None
             }
-            KeyCode::Enter => self.handle_action(workspace),
-            KeyCode::Char('l') => SidebarAction::FocusTerminal,
-            KeyCode::Tab => {
-                self.handle_toggle(workspace);
-                SidebarAction::None
-            }
-            KeyCode::Char('a') => SidebarAction::AddProject,
-            KeyCode::Char('n') => self.with_current_item(|item| match item {
-                SidebarItem::Project { name } => SidebarAction::NewSession(name.clone()),
-                SidebarItem::Session { project, .. } => SidebarAction::NewSession(project.clone()),
-            }),
-            KeyCode::Char('d') => self.with_current_item(|item| match item {
-                SidebarItem::Session { id, .. } => SidebarAction::CloseSession(id.clone()),
-                _ => SidebarAction::None,
-            }),
-            KeyCode::Char('D') => self.with_current_item(|item| match item {
-                SidebarItem::Project { name } => SidebarAction::RemoveProject(name.clone()),
-                _ => SidebarAction::None,
-            }),
-            KeyCode::Char('r') => self.with_current_item(|item| match item {
-                SidebarItem::Project { name } => SidebarAction::RenameProject(name.clone()),
-                SidebarItem::Session { id, .. } => SidebarAction::RenameSession(id.clone()),
-            }),
             KeyCode::Char('J') => self.with_current_item(|item| match item {
                 SidebarItem::Project { .. } => SidebarAction::MoveProject(1),
                 SidebarItem::Session { id, .. } => SidebarAction::MoveSession(id.clone(), 1),
@@ -242,6 +223,39 @@ impl Sidebar {
             KeyCode::Char('K') => self.with_current_item(|item| match item {
                 SidebarItem::Project { .. } => SidebarAction::MoveProject(-1),
                 SidebarItem::Session { id, .. } => SidebarAction::MoveSession(id.clone(), -1),
+            }),
+            KeyCode::Enter => self.handle_action(workspace),
+            KeyCode::Char('l') => SidebarAction::FocusTerminal,
+            KeyCode::Tab => {
+                self.handle_toggle(workspace);
+                SidebarAction::None
+            }
+            _ => SidebarAction::None,
+        }
+    }
+
+    fn with_current_item(&self, f: impl FnOnce(&SidebarItem) -> SidebarAction) -> SidebarAction {
+        match self.current_item() {
+            Some(item) => f(item),
+            None => SidebarAction::None,
+        }
+    }
+
+    /// Handle a key triggered via Ctrl+Space prefix (no focus check, action keys only).
+    pub fn handle_prefix_key(&self, key: &KeyEvent) -> SidebarAction {
+        match key.code {
+            KeyCode::Char('a') => SidebarAction::AddProject,
+            KeyCode::Char('d') => self.with_current_item(|item| match item {
+                SidebarItem::Session { id, .. } => SidebarAction::CloseSession(id.clone()),
+                SidebarItem::Project { name } => SidebarAction::RemoveProject(name.clone()),
+            }),
+            KeyCode::Char('n') => self.with_current_item(|item| match item {
+                SidebarItem::Project { name } => SidebarAction::NewSession(name.clone()),
+                SidebarItem::Session { project, .. } => SidebarAction::NewSession(project.clone()),
+            }),
+            KeyCode::Char('r') => self.with_current_item(|item| match item {
+                SidebarItem::Project { name } => SidebarAction::RenameProject(name.clone()),
+                SidebarItem::Session { id, .. } => SidebarAction::RenameSession(id.clone()),
             }),
             KeyCode::Char('o') => self.with_current_item(|item| match item {
                 SidebarItem::Project { name } => SidebarAction::OpenIde(name.clone()),
@@ -257,13 +271,6 @@ impl Sidebar {
             KeyCode::Char('q') => SidebarAction::Quit,
             KeyCode::Char('Q') => SidebarAction::CleanExit,
             _ => SidebarAction::None,
-        }
-    }
-
-    fn with_current_item(&self, f: impl FnOnce(&SidebarItem) -> SidebarAction) -> SidebarAction {
-        match self.current_item() {
-            Some(item) => f(item),
-            None => SidebarAction::None,
         }
     }
 
@@ -324,8 +331,19 @@ impl Sidebar {
         let w = area.width as usize;
         let mut y = area.y;
 
-        // Header
-        y += 1;
+        // Top separator — matches code pane top border
+        if y < area.y + area.height {
+            let sep = "\u{2500}".repeat(w.saturating_sub(2));
+            buf.set_line(
+                area.x,
+                y,
+                &Line::from(Span::styled(format!(" {} ", sep), sep_style)),
+                area.width,
+            );
+            y += 1;
+        }
+
+        y += 1; // empty line below top separator
 
         let icon_style = Style::default()
             .fg(Color::Rgb(0xEC, 0xBE, 0x7B))
@@ -362,7 +380,7 @@ impl Sidebar {
             y += 1;
         }
 
-        // Items area
+        // Items area (7 lines always reserved for footer)
         let items_top_y = y;
         let footer_y = (area.y + area.height).saturating_sub(7);
         let visible_lines = (footer_y as usize).saturating_sub(items_top_y as usize);
@@ -503,57 +521,99 @@ impl Sidebar {
             }
         }
 
-        // Footer
-        y = (area.y + area.height).saturating_sub(7);
-
-        if y < area.y + area.height {
-            let sep = "\u{2500}".repeat(w.saturating_sub(2));
-            buf.set_line(
-                area.x,
-                y,
-                &Line::from(Span::styled(format!(" {} ", sep), sep_style)),
-                area.width,
-            );
-            y += 1;
-        }
-
-        let footer_lines = [
-            vec![
-                Span::styled(" a", bold),
-                Span::styled(" add project  ", dim),
-                Span::styled("D", bold),
-                Span::styled(" remove", dim),
-            ],
-            vec![
-                Span::styled(" n", bold),
-                Span::styled(" new thread  ", dim),
-                Span::styled("d", bold),
-                Span::styled(" delete", dim),
-            ],
-            vec![
-                Span::styled(" r", bold),
-                Span::styled(" rename  ", dim),
-                Span::styled("J/K", bold),
-                Span::styled(" reorder", dim),
-            ],
-            vec![
-                Span::styled(" o", bold),
-                Span::styled(" open ide  ", dim),
-                Span::styled("c", bold),
-                Span::styled(" configure", dim),
-            ],
-            vec![
-                Span::styled(" q", bold),
-                Span::styled(" quit  ", dim),
-                Span::styled("Q", bold),
-                Span::styled(" clean exit", dim),
-            ],
-        ];
-
-        for spans in &footer_lines {
+        // Footer (content anchored to bottom, separator above content)
+        if self.prefix_active {
+            // 7 lines: separator + 6 command lines
+            y = (area.y + area.height).saturating_sub(7);
             if y < area.y + area.height {
-                buf.set_line(area.x, y, &Line::from(spans.clone()), area.width);
+                let rest = "\u{2500}".repeat(w.saturating_sub(2));
+                buf.set_line(
+                    area.x,
+                    y,
+                    &Line::from(Span::styled(format!(" {} ", rest), sep_style)),
+                    area.width,
+                );
                 y += 1;
+            }
+            let footer_lines: Vec<Vec<Span>> = vec![
+                vec![
+                    Span::styled(" \u{2190}/\u{2192}", bold),
+                    Span::styled(" focus  ", dim),
+                    Span::styled("n", bold),
+                    Span::styled(" new thread", dim),
+                ],
+                vec![
+                    Span::styled(" o", bold),
+                    Span::styled(" open ide  ", dim),
+                    Span::styled("r", bold),
+                    Span::styled(" rename", dim),
+                ],
+                vec![
+                    Span::styled(" a", bold),
+                    Span::styled(" add project  ", dim),
+                    Span::styled("c", bold),
+                    Span::styled(" config", dim),
+                ],
+                vec![
+                    Span::styled(" d", bold),
+                    Span::styled(" delete  ", dim),
+                    Span::styled("g", bold),
+                    Span::styled(" github", dim),
+                ],
+                vec![
+                    Span::styled(" q", bold),
+                    Span::styled(" quit  ", dim),
+                    Span::styled("Q", bold),
+                    Span::styled(" clean exit", dim),
+                ],
+            ];
+            for spans in &footer_lines {
+                if y < area.y + area.height {
+                    buf.set_line(area.x, y, &Line::from(spans.clone()), area.width);
+                    y += 1;
+                }
+            }
+        } else {
+            // 3 lines: separator + 2 hint lines (anchored to bottom)
+            y = (area.y + area.height).saturating_sub(3);
+            if y < area.y + area.height {
+                if self.focused {
+                    let rest = "\u{2500}".repeat(w.saturating_sub(10));
+                    buf.set_line(
+                        area.x,
+                        y,
+                        &Line::from(vec![
+                            Span::styled(" focused ", sep_style),
+                            Span::styled(rest, sep_style),
+                        ]),
+                        area.width,
+                    );
+                } else {
+                    let rest = "\u{2500}".repeat(w.saturating_sub(2));
+                    buf.set_line(
+                        area.x,
+                        y,
+                        &Line::from(Span::styled(format!(" {} ", rest), sep_style)),
+                        area.width,
+                    );
+                }
+                y += 1;
+            }
+            let footer_lines: Vec<Vec<Span>> = vec![
+                vec![
+                    Span::styled(" ctrl+space", bold),
+                    Span::styled(" run commands", dim),
+                ],
+                vec![
+                    Span::styled(" J/K", bold),
+                    Span::styled(" reorder", dim),
+                ],
+            ];
+            for spans in &footer_lines {
+                if y < area.y + area.height {
+                    buf.set_line(area.x, y, &Line::from(spans.clone()), area.width);
+                    y += 1;
+                }
             }
         }
     }

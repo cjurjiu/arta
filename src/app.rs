@@ -364,6 +364,7 @@ impl App {
         // Prefix mode: Ctrl+Space was pressed, next key is a command
         if self.prefix_active {
             self.prefix_active = false;
+            self.sidebar.set_prefix_active(false);
             match key.code {
                 // Focus switching
                 KeyCode::Left => {
@@ -378,9 +379,9 @@ impl App {
                     }
                     return;
                 }
-                // All sidebar commands work from any focus via prefix
+                // Action commands work from any focus via prefix
                 _ => {
-                    let action = self.sidebar.handle_key(&key, &self.workspace);
+                    let action = self.sidebar.handle_prefix_key(&key);
                     self.process_sidebar_action(action);
                     return;
                 }
@@ -390,6 +391,7 @@ impl App {
         // Ctrl+Space activates prefix
         if key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.prefix_active = true;
+            self.sidebar.set_prefix_active(true);
             return;
         }
 
@@ -840,21 +842,22 @@ impl App {
                 .fg(Color::Rgb(0xFF, 0x6C, 0x6B))
                 .add_modifier(Modifier::BOLD);
             let term_focused = self.focus == Focus::Terminal;
+            let border_style = if term_focused { focus_red_bold } else { dim };
 
-            if term_focused {
-                let term_border = "\u{2500}".repeat(right_width as usize);
+            // Top border (always visible, red when focused)
+            {
+                let border = "\u{2500}".repeat(right_width as usize);
                 frame.buffer_mut().set_line(
                     right_x,
                     0,
-                    &Line::from(Span::styled(&term_border, focus_red_bold)),
+                    &Line::from(Span::styled(&border, border_style)),
                     right_width,
                 );
             }
 
-            // Terminal content fills available space (2 lines below focus border)
-            let term_content_y: u16 = 1; // 1 line top padding
-            let reserved: u16 = if term_focused { 4 } else { 3 };
-            let term_content_height = main_height.saturating_sub(reserved);
+            // Terminal content (reserved is always 4: top + bottom border + 2 status)
+            let term_content_y: u16 = 1;
+            let term_content_height = main_height.saturating_sub(4);
             let term_area = Rect::new(right_x, term_content_y, right_width, term_content_height);
 
             let id = self.active_session.as_ref().unwrap();
@@ -863,14 +866,25 @@ impl App {
                 .unwrap()
                 .render(term_area, frame.buffer_mut());
 
-            // Bottom focus line (above the 3-line status area)
+            // Bottom border (always visible, "focused" label when active)
+            let border_y = term_content_y + term_content_height;
             if term_focused {
-                let term_border = "\u{2500}".repeat(right_width as usize);
-                let border_y = term_content_y + term_content_height;
+                let rest = "\u{2500}".repeat((right_width as usize).saturating_sub(9));
                 frame.buffer_mut().set_line(
                     right_x,
                     border_y,
-                    &Line::from(Span::styled(&term_border, focus_red_bold)),
+                    &Line::from(vec![
+                        Span::styled(" focused ", border_style),
+                        Span::styled(rest, border_style),
+                    ]),
+                    right_width,
+                );
+            } else {
+                let border = "\u{2500}".repeat(right_width as usize);
+                frame.buffer_mut().set_line(
+                    right_x,
+                    border_y,
+                    &Line::from(Span::styled(border, border_style)),
                     right_width,
                 );
             }
@@ -880,44 +894,40 @@ impl App {
             welcome::render_welcome(right_area, frame.buffer_mut());
         }
 
-        // Version bar (always visible, right-aligned on second-to-last line)
-        let version_y = main_height.saturating_sub(2);
-        if version_y > 0 {
-            let icon_style = Style::default()
-                .fg(Color::Rgb(0xEC, 0xBE, 0x7B))
-                .add_modifier(Modifier::BOLD);
-            let name_style = Style::default()
-                .fg(Color::Rgb(0xFF, 0x6C, 0x6B))
-                .add_modifier(Modifier::BOLD);
+        // Status bar (always visible, right-aligned on second-to-last line)
+        let bar_y = main_height.saturating_sub(2);
+        if bar_y > 0 {
             let gray = Style::default().fg(Color::Rgb(0x88, 0x88, 0x88));
-            let icon = if self.sidebar.nerd_font() {
-                "\u{f03e}  "
-            } else {
-                "\u{1f5bc}\u{fe0f}  "
-            };
+            let gray_bold = gray.add_modifier(Modifier::BOLD);
+            let mode = if self.prefix_active { "run" } else { "interactive" };
             let version_text = format!("v{}", env!("CARGO_PKG_VERSION"));
             let bar = Line::from(vec![
-                Span::styled(icon, icon_style),
-                Span::styled("a r t a", name_style),
-                Span::styled(" - ", gray),
+                Span::styled(mode, gray_bold),
+                Span::styled(" | ", gray),
                 Span::styled(version_text, gray),
                 Span::styled(" | ", gray),
                 Span::styled("MIT", gray),
                 Span::styled(" | ", gray),
-                Span::styled("g", gray.add_modifier(Modifier::BOLD)),
+                Span::styled("g", gray_bold),
                 Span::styled(" - github ", gray),
             ]);
-            let bar_width: u16 = 42;
+            let bar_width: u16 = (mode.len() + 30) as u16;
             let bar_x = right_x + right_width.saturating_sub(bar_width);
-            frame.buffer_mut().set_line(bar_x, version_y, &bar, bar_width);
+            frame.buffer_mut().set_line(bar_x, bar_y, &bar, bar_width);
 
-            // Timed message (left side of same row)
+            // Left side: timed message or "awaiting command..." in prefix mode
             if let Some((msg, _)) = &self.timed_message {
-                let msg_style = Style::default();
                 frame.buffer_mut().set_line(
                     right_x,
-                    version_y,
-                    &Line::from(Span::styled(format!(" {}", msg), msg_style)),
+                    bar_y,
+                    &Line::from(Span::styled(format!(" {}", msg), Style::default())),
+                    right_width.saturating_sub(bar_width),
+                );
+            } else if self.prefix_active {
+                frame.buffer_mut().set_line(
+                    right_x,
+                    bar_y,
+                    &Line::from(Span::styled(" awaiting command...", gray)),
                     right_width.saturating_sub(bar_width),
                 );
             }
