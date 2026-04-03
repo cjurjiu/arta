@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -29,10 +30,144 @@ enum Focus {
 enum InputPurpose {
     ProjectPath,
     ProjectName,
+    ProjectOpenCommand,
     RenameProject,
     RenameSession,
     ConfirmCloseSession,
     ConfirmRemoveProject,
+    ConfigureProjectPath,
+    ConfigureOpenCommand,
+}
+
+const CONFIG_MENU_MAX_VISIBLE: usize = 5;
+
+#[derive(Clone, Copy, PartialEq)]
+enum ConfigOption {
+    Rename,
+    ProjectPath,
+    OpenCommand,
+}
+
+struct ConfigMenu {
+    project: String,
+    items: Vec<(ConfigOption, &'static str)>,
+    cursor: usize,
+    scroll: usize,
+}
+
+impl ConfigMenu {
+    fn new(project: String) -> Self {
+        ConfigMenu {
+            project,
+            items: vec![
+                (ConfigOption::Rename, "Rename"),
+                (ConfigOption::ProjectPath, "Project path"),
+                (ConfigOption::OpenCommand, "Open command"),
+            ],
+            cursor: 0,
+            scroll: 0,
+        }
+    }
+
+    fn height(&self) -> u16 {
+        // separator + title + separator + visible items
+        3 + self.items.len().min(CONFIG_MENU_MAX_VISIBLE) as u16
+    }
+
+    fn selected(&self) -> ConfigOption {
+        self.items[self.cursor].0
+    }
+
+    fn handle_key(&mut self, key: &KeyEvent) -> ConfigMenuResult {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.cursor < self.items.len() - 1 {
+                    self.cursor += 1;
+                    if self.cursor >= self.scroll + CONFIG_MENU_MAX_VISIBLE {
+                        self.scroll = self.cursor - CONFIG_MENU_MAX_VISIBLE + 1;
+                    }
+                }
+                ConfigMenuResult::None
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                    if self.cursor < self.scroll {
+                        self.scroll = self.cursor;
+                    }
+                }
+                ConfigMenuResult::None
+            }
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                ConfigMenuResult::Select(self.selected())
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => ConfigMenuResult::Cancel,
+            _ => ConfigMenuResult::None,
+        }
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let dim = Style::default().add_modifier(Modifier::DIM);
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let w = area.width as usize;
+        let mut y = area.y;
+
+        // Separator
+        let sep = "\u{2500}".repeat(w.saturating_sub(2));
+        buf.set_line(
+            area.x,
+            y,
+            &Line::from(Span::styled(format!(" {} ", sep), dim)),
+            area.width,
+        );
+        y += 1;
+
+        // Title
+        buf.set_line(
+            area.x,
+            y,
+            &Line::from(Span::styled(
+                format!(" Settings for {}", self.project),
+                bold,
+            )),
+            area.width,
+        );
+        y += 1;
+
+        // Separator
+        buf.set_line(
+            area.x,
+            y,
+            &Line::from(Span::styled(format!(" {} ", sep), dim)),
+            area.width,
+        );
+        y += 1;
+
+        // Items
+        let end = (self.scroll + CONFIG_MENU_MAX_VISIBLE).min(self.items.len());
+        for i in self.scroll..end {
+            if y >= area.y + area.height {
+                break;
+            }
+            let (_, label) = self.items[i];
+            let is_selected = i == self.cursor;
+            let prefix = if is_selected { " \u{25b8} " } else { "   " };
+            let style = if is_selected {
+                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            let text = format!("{}{:<width$}", prefix, label, width = w.saturating_sub(3));
+            buf.set_line(area.x, y, &Line::from(Span::styled(text, style)), area.width);
+            y += 1;
+        }
+    }
+}
+
+enum ConfigMenuResult {
+    None,
+    Select(ConfigOption),
+    Cancel,
 }
 
 pub struct App {
@@ -45,6 +180,9 @@ pub struct App {
     input_purpose: Option<InputPurpose>,
     input_context: Option<String>,
     pending_path: Option<String>,
+    pending_name: Option<String>,
+    status_message: Option<String>,
+    config_menu: Option<ConfigMenu>,
     prefix_active: bool,
     bell_tx: mpsc::Sender<PaneEvent>,
     bell_rx: mpsc::Receiver<PaneEvent>,
@@ -73,7 +211,7 @@ impl App {
         let (bell_tx, bell_rx) = mpsc::channel();
 
         let pane_width = term_w.saturating_sub(SIDEBAR_WIDTH + 1).max(10);
-        let pane_height = term_h.saturating_sub(2).max(5);
+        let pane_height = term_h.saturating_sub(4).max(5);
 
         // Eagerly attach PTYs for all surviving sessions
         let mut panes = HashMap::new();
@@ -90,16 +228,51 @@ impl App {
             }
         }
 
+        // Restore last active session, or fall back to first alive session
+        let mut active_session = None;
+        if let Some(ref saved_id) = workspace.active_session {
+            if panes.contains_key(saved_id) {
+                active_session = Some(saved_id.clone());
+            }
+        }
+        if active_session.is_none() {
+            // Find first alive session by project order
+            'outer: for project in &workspace.projects {
+                for session in workspace.sessions_for_project(&project.name) {
+                    if panes.contains_key(&session.id) {
+                        active_session = Some(session.id.clone());
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        let (focus, sidebar_focused) = if active_session.is_some() {
+            (Focus::Terminal, false)
+        } else {
+            (Focus::Sidebar, true)
+        };
+
+        let mut sidebar = sidebar;
+        if let Some(ref id) = active_session {
+            sidebar.set_selected(id);
+            sidebar.ensure_expanded(id, &workspace);
+            sidebar.set_focused(sidebar_focused);
+        }
+
         App {
             sidebar,
             panes,
             input_panel,
             workspace,
-            focus: Focus::Sidebar,
-            active_session: None,
+            focus,
+            active_session,
             input_purpose: None,
             input_context: None,
             pending_path: None,
+            pending_name: None,
+            status_message: None,
+            config_menu: None,
             prefix_active: false,
             bell_tx,
             bell_rx,
@@ -126,7 +299,7 @@ impl App {
             }
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => {
-                if self.input_panel.is_active() {
+                if self.input_panel.is_active() || self.config_menu.is_some() {
                     return;
                 }
                 if mouse.column < SIDEBAR_WIDTH {
@@ -147,6 +320,27 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        self.status_message = None;
+
+        // Config menu gets priority
+        if let Some(menu) = &mut self.config_menu {
+            let result = menu.handle_key(&key);
+            match result {
+                ConfigMenuResult::Select(option) => {
+                    let project = menu.project.clone();
+                    self.config_menu = None;
+                    self.handle_config_select(option, &project);
+                }
+                ConfigMenuResult::Cancel => {
+                    self.config_menu = None;
+                    self.focus = Focus::Sidebar;
+                    self.sidebar.set_focused(true);
+                }
+                ConfigMenuResult::None => {}
+            }
+            return;
+        }
+
         // Input panel gets priority
         if self.input_panel.is_active() {
             let action = self.input_panel.handle_key(&key);
@@ -154,6 +348,8 @@ impl App {
                 InputAction::Submit(value) => self.handle_input_submit(value),
                 InputAction::Cancel => {
                     self.input_purpose = None;
+                    self.pending_path = None;
+                    self.pending_name = None;
                     self.focus = Focus::Sidebar;
                     self.sidebar.set_focused(true);
                 }
@@ -218,7 +414,8 @@ impl App {
             SidebarAction::SelectSession(id) => {
                 self.sidebar.set_selected(&id);
                 self.sidebar.clear_attention(&id);
-                self.active_session = Some(id);
+                self.active_session = Some(id.clone());
+                self.workspace.set_active_session(Some(&id));
                 self.focus = Focus::Terminal;
                 self.sidebar.set_focused(false);
             }
@@ -267,14 +464,41 @@ impl App {
                         let target = i as i32 + direction;
                         if target >= 0 && (target as usize) < self.workspace.projects.len() {
                             self.workspace.swap_projects(i, target as usize);
+                            self.sidebar.refresh(&self.workspace);
+                            self.sidebar.set_cursor_to_project(&project_name);
                         }
                     }
                 }
-                self.sidebar.refresh(&self.workspace);
             }
             SidebarAction::MoveSession(id, direction) => {
                 self.workspace.swap_session_in_project(&id, direction);
                 self.sidebar.refresh(&self.workspace);
+                self.sidebar.set_cursor_to_session(&id);
+            }
+            SidebarAction::OpenIde(project) => {
+                if let Some(cmd) = self.workspace.get_project_open_command(&project) {
+                    let cmd = cmd.to_string();
+                    let dir = self
+                        .workspace
+                        .get_project_path(&project)
+                        .unwrap_or("")
+                        .to_string();
+                    let parts: Vec<&str> = cmd.split_whitespace().collect();
+                    if let Some((&program, args)) = parts.split_first() {
+                        let _ = std::process::Command::new(program)
+                            .args(args)
+                            .current_dir(&dir)
+                            .spawn();
+                    }
+                } else {
+                    self.status_message =
+                        Some("No open command configured. Press 'c' to configure.".to_string());
+                }
+            }
+            SidebarAction::ConfigureProject(name) => {
+                self.config_menu = Some(ConfigMenu::new(name));
+                self.focus = Focus::Input;
+                self.sidebar.set_focused(false);
             }
             SidebarAction::FocusTerminal => {
                 if self.active_session.is_some() {
@@ -341,11 +565,24 @@ impl App {
             Some(InputPurpose::ProjectName) => {
                 if !value.is_empty() {
                     let name = workspace::sanitize_name(&value);
-                    let path = self.pending_path.take().unwrap_or_default();
-                    self.workspace.add_project(&name, &path);
-                    self.sidebar.refresh(&self.workspace);
+                    self.pending_name = Some(name.clone());
+                    self.open_input(
+                        InputPurpose::ProjectOpenCommand,
+                        "Open command (optional, e.g. \"webstorm .\")",
+                        "",
+                        "",
+                    );
+                    return;
                 }
                 self.pending_path = None;
+                self.pending_name = None;
+            }
+            Some(InputPurpose::ProjectOpenCommand) => {
+                let name = self.pending_name.take().unwrap_or_default();
+                let path = self.pending_path.take().unwrap_or_default();
+                let open_cmd = if value.is_empty() { None } else { Some(value.as_str()) };
+                self.workspace.add_project(&name, &path, open_cmd);
+                self.sidebar.refresh(&self.workspace);
             }
             Some(InputPurpose::RenameProject) => {
                 let new_name = workspace::sanitize_name(&value);
@@ -403,11 +640,61 @@ impl App {
                     }
                 }
             }
+            Some(InputPurpose::ConfigureProjectPath) => {
+                if let Some(project) = context {
+                    let path = expand_tilde(&value);
+                    if !path.is_empty() {
+                        self.workspace.set_project_path(&project, &path);
+                    }
+                }
+            }
+            Some(InputPurpose::ConfigureOpenCommand) => {
+                if let Some(project) = context {
+                    self.workspace.set_project_open_command(&project, &value);
+                }
+            }
             None => {}
         }
 
         self.focus = Focus::Sidebar;
         self.sidebar.set_focused(true);
+    }
+
+    fn handle_config_select(&mut self, option: ConfigOption, project: &str) {
+        match option {
+            ConfigOption::Rename => {
+                let title = format!("Rename project \u{2014} {}", project);
+                self.open_input(InputPurpose::RenameProject, &title, project, project);
+            }
+            ConfigOption::ProjectPath => {
+                let current_path = self
+                    .workspace
+                    .get_project_path(project)
+                    .unwrap_or("")
+                    .to_string();
+                let title = format!("Project path \u{2014} {}", project);
+                self.input_context = Some(project.to_string());
+                self.open_input_path(
+                    InputPurpose::ConfigureProjectPath,
+                    &title,
+                    &current_path,
+                );
+            }
+            ConfigOption::OpenCommand => {
+                let current_cmd = self
+                    .workspace
+                    .get_project_open_command(project)
+                    .unwrap_or("")
+                    .to_string();
+                let title = format!("Open command \u{2014} {} (e.g. \"webstorm .\")", project);
+                self.open_input(
+                    InputPurpose::ConfigureOpenCommand,
+                    &title,
+                    &current_cmd,
+                    project,
+                );
+            }
+        }
     }
 
     fn create_session(&mut self, project_name: &str) {
@@ -440,6 +727,7 @@ impl App {
         ) {
             self.panes.insert(session.id.clone(), pane);
             self.active_session = Some(session.id.clone());
+            self.workspace.set_active_session(Some(&session.id));
             self.sidebar.set_selected(&session.id);
             self.sidebar.ensure_expanded(&session.id, &self.workspace);
             self.focus = Focus::Terminal;
@@ -459,6 +747,7 @@ impl App {
         self.panes.remove(id);
         if self.active_session.as_deref() == Some(id) {
             self.active_session = None;
+            self.workspace.set_active_session(None);
         }
     }
 
@@ -486,6 +775,8 @@ impl App {
         let mut main_height = size.height;
         if self.input_panel.is_active() {
             main_height = size.height.saturating_sub(INPUT_PANEL_HEIGHT + 1).max(5);
+        } else if let Some(menu) = &self.config_menu {
+            main_height = size.height.saturating_sub(menu.height()).max(5);
         }
 
         self.sidebar.set_size(SIDEBAR_WIDTH, main_height);
@@ -532,9 +823,9 @@ impl App {
                 );
             }
 
-            // Terminal content fills available space
+            // Terminal content fills available space (2 lines below focus border)
             let term_content_y: u16 = 1; // 1 line top padding
-            let reserved: u16 = if term_focused { 2 } else { 1 };
+            let reserved: u16 = if term_focused { 4 } else { 3 };
             let term_content_height = main_height.saturating_sub(reserved);
             let term_area = Rect::new(right_x, term_content_y, right_width, term_content_height);
 
@@ -544,15 +835,61 @@ impl App {
                 .unwrap()
                 .render(term_area, frame.buffer_mut());
 
+            // Bottom focus line (above the 3-line status area)
             if term_focused {
                 let term_border = "\u{2500}".repeat(right_width as usize);
-                let bottom_y = main_height.saturating_sub(1);
+                let border_y = term_content_y + term_content_height;
                 frame.buffer_mut().set_line(
                     right_x,
-                    bottom_y,
+                    border_y,
                     &Line::from(Span::styled(&term_border, focus_red_bold)),
                     right_width,
                 );
+            }
+
+            // Version bar (first line below focus border, right-aligned)
+            let version_y = main_height.saturating_sub(2);
+            if version_y > term_content_y + term_content_height {
+                let icon_style = Style::default()
+                    .fg(Color::Rgb(0xEC, 0xBE, 0x7B))
+                    .add_modifier(Modifier::BOLD);
+                let name_style = Style::default()
+                    .fg(Color::Rgb(0xFF, 0x6C, 0x6B))
+                    .add_modifier(Modifier::BOLD);
+                let version_style = Style::default().fg(Color::Rgb(0x88, 0x88, 0x88));
+                let icon = if self.sidebar.nerd_font() {
+                    "\u{f03e}  "
+                } else {
+                    "\u{1f5bc}\u{fe0f}  "
+                };
+                let version_text = format!("v{}", env!("CARGO_PKG_VERSION"));
+                let bar = Line::from(vec![
+                    Span::styled(icon, icon_style),
+                    Span::styled("a r t a", name_style),
+                    Span::styled(" - ", version_style),
+                    Span::styled(version_text, version_style),
+                    Span::raw(" "),
+                ]);
+                // Right-align
+                let bar_width: u16 = 22;
+                let bar_x = right_x + right_width.saturating_sub(bar_width);
+                frame.buffer_mut().set_line(bar_x, version_y, &bar, bar_width);
+            }
+
+            // Status message line (second line below focus border)
+            if let Some(msg) = &self.status_message {
+                let status_y = main_height.saturating_sub(1);
+                if status_y > term_content_y + term_content_height {
+                    let status_style = Style::default()
+                        .fg(Color::Rgb(0xFF, 0x6C, 0x6B))
+                        .add_modifier(Modifier::DIM);
+                    frame.buffer_mut().set_line(
+                        right_x,
+                        status_y,
+                        &Line::from(Span::styled(format!(" {}", msg), status_style)),
+                        right_width,
+                    );
+                }
             }
         } else {
             let right_area = Rect::new(right_x, 0, right_width, main_height);
@@ -569,6 +906,14 @@ impl App {
             let (cx, cy) = self.input_panel.cursor_position(panel_area);
             frame.set_cursor_position((cx, cy));
         }
+
+        // Config menu
+        if let Some(menu) = &self.config_menu {
+            let panel_y = main_height;
+            let panel_height = size.height.saturating_sub(main_height);
+            let panel_area = Rect::new(0, panel_y, size.width, panel_height);
+            menu.render(panel_area, frame.buffer_mut());
+        }
     }
 
     fn pane_size(&self) -> (u16, u16) {
@@ -576,9 +921,11 @@ impl App {
         let mut main_height = self.height;
         if self.input_panel.is_active() {
             main_height = main_height.saturating_sub(INPUT_PANEL_HEIGHT + 1);
+        } else if let Some(menu) = &self.config_menu {
+            main_height = main_height.saturating_sub(menu.height());
         }
-        // 1 line top padding + 1 line bottom border (when focused)
-        let pane_height = main_height.saturating_sub(2);
+        // 1 line top padding + 2 status lines + 1 line bottom border (when focused)
+        let pane_height = main_height.saturating_sub(4);
         (right_width.max(10), pane_height.max(5))
     }
 

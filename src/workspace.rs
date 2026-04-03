@@ -6,6 +6,8 @@ use std::path::PathBuf;
 pub struct Project {
     pub name: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_command: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -19,6 +21,8 @@ pub struct Session {
 pub struct Workspace {
     pub projects: Vec<Project>,
     pub sessions: Vec<Session>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_session: Option<String>,
     #[serde(skip)]
     file_path: PathBuf,
 }
@@ -44,6 +48,7 @@ impl Workspace {
         Workspace {
             projects: Vec::new(),
             sessions: Vec::new(),
+            active_session: None,
             file_path: dir.join("workspace.json"),
         }
     }
@@ -57,6 +62,7 @@ impl Workspace {
         let loaded: Workspace = serde_json::from_str(&data)?;
         self.projects = loaded.projects;
         self.sessions = loaded.sessions;
+        self.active_session = loaded.active_session;
         Ok(())
     }
 
@@ -69,13 +75,14 @@ impl Workspace {
         Ok(())
     }
 
-    pub fn add_project(&mut self, name: &str, path: &str) {
+    pub fn add_project(&mut self, name: &str, path: &str, open_command: Option<&str>) {
         if self.projects.iter().any(|p| p.name == name) {
             return;
         }
         self.projects.push(Project {
             name: name.to_string(),
             path: path.to_string(),
+            open_command: open_command.map(|s| s.to_string()),
         });
         let _ = self.save();
     }
@@ -175,6 +182,32 @@ impl Workspace {
             .find(|p| p.name == name)
             .map(|p| p.path.as_str())
     }
+
+    pub fn get_project_open_command(&self, name: &str) -> Option<&str> {
+        self.projects
+            .iter()
+            .find(|p| p.name == name)
+            .and_then(|p| p.open_command.as_deref())
+    }
+
+    pub fn set_project_path(&mut self, name: &str, path: &str) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.name == name) {
+            p.path = path.to_string();
+            let _ = self.save();
+        }
+    }
+
+    pub fn set_active_session(&mut self, id: Option<&str>) {
+        self.active_session = id.map(|s| s.to_string());
+        let _ = self.save();
+    }
+
+    pub fn set_project_open_command(&mut self, name: &str, cmd: &str) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.name == name) {
+            p.open_command = if cmd.is_empty() { None } else { Some(cmd.to_string()) };
+            let _ = self.save();
+        }
+    }
 }
 
 fn chrono_now() -> String {
@@ -255,6 +288,7 @@ mod tests {
         Workspace {
             projects: Vec::new(),
             sessions: Vec::new(),
+            active_session: None,
             file_path: dir.join("workspace.json"),
         }
     }
@@ -269,12 +303,12 @@ mod tests {
     #[test]
     fn test_add_remove_project() {
         let mut ws = temp_workspace();
-        ws.add_project("test", "/tmp/test");
+        ws.add_project("test", "/tmp/test", None);
         assert_eq!(ws.projects.len(), 1);
         assert_eq!(ws.projects[0].name, "test");
 
         // Duplicate should be ignored
-        ws.add_project("test", "/tmp/test2");
+        ws.add_project("test", "/tmp/test2", None);
         assert_eq!(ws.projects.len(), 1);
 
         ws.remove_project("test");
@@ -284,7 +318,7 @@ mod tests {
     #[test]
     fn test_create_session() {
         let mut ws = temp_workspace();
-        ws.add_project("proj", "/tmp/proj");
+        ws.add_project("proj", "/tmp/proj", None);
         ws.create_session("proj");
         ws.create_session("proj");
         assert_eq!(ws.sessions.len(), 2);
@@ -295,7 +329,7 @@ mod tests {
     #[test]
     fn test_rename_project() {
         let mut ws = temp_workspace();
-        ws.add_project("old", "/tmp/old");
+        ws.add_project("old", "/tmp/old", None);
         ws.create_session("old");
         ws.rename_project("old", "new");
         assert_eq!(ws.projects[0].name, "new");
@@ -305,7 +339,7 @@ mod tests {
     #[test]
     fn test_json_roundtrip() {
         let mut ws = temp_workspace();
-        ws.add_project("proj", "/tmp/proj");
+        ws.add_project("proj", "/tmp/proj", None);
         ws.create_session("proj");
         ws.save().unwrap();
 
@@ -326,8 +360,8 @@ mod tests {
     #[test]
     fn test_swap_projects() {
         let mut ws = temp_workspace();
-        ws.add_project("a", "/tmp/a");
-        ws.add_project("b", "/tmp/b");
+        ws.add_project("a", "/tmp/a", None);
+        ws.add_project("b", "/tmp/b", None);
         ws.swap_projects(0, 1);
         assert_eq!(ws.projects[0].name, "b");
         assert_eq!(ws.projects[1].name, "a");

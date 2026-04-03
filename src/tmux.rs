@@ -31,6 +31,9 @@ pub fn create_session(name: &str, dir: &str) {
     let _ = Command::new("tmux")
         .args(["set-option", "-t", name, "bell-action", "any"])
         .output();
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", name, "visual-bell", "off"])
+        .output();
 }
 
 pub fn kill_session(name: &str) {

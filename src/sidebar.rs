@@ -18,6 +18,8 @@ pub enum SidebarAction {
     RenameSession(String),
     MoveProject(i32),
     MoveSession(String, i32),
+    OpenIde(String),
+    ConfigureProject(String),
     FocusTerminal,
     Quit,
     CleanExit,
@@ -68,6 +70,10 @@ impl Sidebar {
         self.focused = f;
     }
 
+    pub fn nerd_font(&self) -> bool {
+        self.nerd_font
+    }
+
     pub fn set_selected(&mut self, id: &str) {
         self.selected = Some(id.to_string());
         self.attention.remove(id);
@@ -85,6 +91,24 @@ impl Sidebar {
 
     pub fn refresh(&mut self, workspace: &Workspace) {
         self.rebuild_items(workspace);
+    }
+
+    pub fn set_cursor_to_project(&mut self, name: &str) {
+        for (i, item) in self.items.iter().enumerate() {
+            if matches!(item, SidebarItem::Project { name: n } if n == name) {
+                self.cursor = i;
+                return;
+            }
+        }
+    }
+
+    pub fn set_cursor_to_session(&mut self, id: &str) {
+        for (i, item) in self.items.iter().enumerate() {
+            if matches!(item, SidebarItem::Session { id: sid, .. } if sid == id) {
+                self.cursor = i;
+                return;
+            }
+        }
     }
 
     fn rebuild_items(&mut self, workspace: &Workspace) {
@@ -174,6 +198,16 @@ impl Sidebar {
                 SidebarItem::Project { .. } => SidebarAction::MoveProject(-1),
                 SidebarItem::Session { id, .. } => SidebarAction::MoveSession(id.clone(), -1),
             }),
+            KeyCode::Char('o') => self.with_current_item(|item| match item {
+                SidebarItem::Project { name } => SidebarAction::OpenIde(name.clone()),
+                SidebarItem::Session { project, .. } => SidebarAction::OpenIde(project.clone()),
+            }),
+            KeyCode::Char('c') => self.with_current_item(|item| match item {
+                SidebarItem::Project { name } => SidebarAction::ConfigureProject(name.clone()),
+                SidebarItem::Session { project, .. } => {
+                    SidebarAction::ConfigureProject(project.clone())
+                }
+            }),
             KeyCode::Char('q') => SidebarAction::Quit,
             KeyCode::Char('Q') => SidebarAction::CleanExit,
             _ => SidebarAction::None,
@@ -197,7 +231,7 @@ impl Sidebar {
                 SidebarItem::Project { .. } => line += 2,
                 SidebarItem::Session { .. } => line += 1,
             }
-            if line >= y && y > 0 {
+            if line > y && y > 0 {
                 self.cursor = i;
                 return self.handle_action(workspace);
             }
@@ -395,7 +429,7 @@ impl Sidebar {
         }
 
         // Footer
-        let footer_y = area.y + area.height - 6;
+        let footer_y = area.y + area.height - 7;
         if footer_y > y {
             y = footer_y;
         }
@@ -420,17 +454,21 @@ impl Sidebar {
             ],
             vec![
                 Span::styled(" n", bold),
-                Span::styled(" new thread", dim),
-            ],
-            vec![
-                Span::styled(" d", bold),
-                Span::styled(" delete thread", dim),
+                Span::styled(" new thread  ", dim),
+                Span::styled("d", bold),
+                Span::styled(" delete", dim),
             ],
             vec![
                 Span::styled(" r", bold),
                 Span::styled(" rename  ", dim),
                 Span::styled("J/K", bold),
                 Span::styled(" reorder", dim),
+            ],
+            vec![
+                Span::styled(" o", bold),
+                Span::styled(" open ide  ", dim),
+                Span::styled("c", bold),
+                Span::styled(" configure", dim),
             ],
             vec![
                 Span::styled(" q", bold),

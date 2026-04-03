@@ -18,6 +18,11 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|a| a == "--version" || a == "-v") {
+        println!("arta {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     // Terminal setup
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();

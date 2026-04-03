@@ -1,14 +1,14 @@
-# 🖼️ a r t a
+# `🖼️ a r t a`
 
-**agent runtime terminal application**
+<code><u>a</u>gent <u>r</u>untime <u>t</u>erminal <u>a</u>pplication</code>
 
-A terminal workspace manager for AI coding agents. Organize projects in a sidebar, manage multiple tmux-backed sessions, and switch between them — all from a single binary.
+A terminal workspace manager for parallel AI coding agents. Organize projects in a sidebar, manage multiple tmux-backed sessions, and switch between them — all from a single binary.
 
 > **Status:** Early prototype. Rewritten in Rust with [Ratatui](https://ratatui.rs/) for low-latency terminal embedding.
 
 ```
  ┌────────────────┬─────────────────────────────────────────────┐
- │   🖼 arta      │  $ ~/projects/my-app                        │
+ │   🖼 a r t a   │  $ ~/projects/my-app                        │
  │ -------------- │  > claude                                   │
  │ ▼ my-app (2)   │  ╭─────────────────────────────────────╮    │
  │   session-1    │  │ claude> fix the login bug           │    │
@@ -20,9 +20,10 @@ A terminal workspace manager for AI coding agents. Organize projects in a sideba
  │                │  $ █                                        │
  │ ---------------│                                             │
  │ a add  D rm    │                                             │
- │ n session      │                                             │
- │ r rename       │                                             │
- │ q quit         │ [] 1 claude * - 2 zsh       2026-04-02 18:27│
+ │ n thread  d del│                                             │
+ │ r rename J/K mv│                                             │
+ │ o open  c conf │                                             │
+ │ q quit  Q clean│ [] 1 claude * - 2 zsh       2026-04-02 18:27│
  └────────────────┴─────────────────────────────────────────────┘
       sidebar          tmux session (full PTY)
 ```
@@ -32,6 +33,9 @@ A terminal workspace manager for AI coding agents. Organize projects in a sideba
 - **Project sidebar** — add, rename, reorder, and remove projects
 - **Tmux-backed sessions** — each session is an isolated tmux session with "claude" and "terminal" windows
 - **Session persistence** — quit ARTA, sessions keep running. Reopen and reattach instantly
+- **Session restore** — remembers and reopens your last active session on startup
+- **Open IDE** — press `o` to launch your configured IDE (e.g., `webstorm .`, `idea .`) for any project
+- **Project configuration** — press `c` to configure project name, path, or open command via a navigable menu
 - **Bell detection** — detects BEL character inline from PTY output, shows indicator + plays sound
 - **Nerd Font detection** — auto-detects and uses icons when available, falls back to Unicode
 - **Full-width input panel** — tab-complete paths, browse directories, rename with full cursor support
@@ -70,11 +74,13 @@ arta
 
 | Key | Action |
 |-----|--------|
-| `a` | Add project |
+| `a` | Add project (path → name → open command) |
 | `D` | Remove project (+ kills all sessions) |
 | `n` | New session |
 | `d` | Close session (kills tmux) |
 | `r` | Rename project or session |
+| `o` | Open IDE (runs configured open command) |
+| `c` | Configure project (rename, path, open command) |
 | `J` / `K` | Reorder project or session |
 | `j` / `k` | Navigate up/down |
 | `tab` | Expand/collapse project |
@@ -136,7 +142,7 @@ ARTA (Rust binary)
 │       ├── Window "claude" → auto-launches claude
 │       └── Window "terminal" → plain shell
 └── workspace.json (~/.config/arta/data/)
-    └── Projects & sessions state
+    └── Projects, sessions, active session & per-project config
 ```
 
 ## How it works
@@ -148,6 +154,7 @@ ARTA (Rust binary)
 - **Switching sessions** just changes which parser's screen is rendered — instant, no teardown
 - **Bell detection** is inline: when BEL (0x07) appears in PTY output, the reader thread notifies the main thread
 - **Key input** is written directly to the active PTY's master fd — no message queue, minimal latency
+- **Session restore** — the last active session is saved to `workspace.json` and auto-reopened on startup; falls back to the first alive session if the saved one is gone
 - When you **quit** (`q`), tmux sessions stay alive — reopen ARTA to reattach
 - When you **clean exit** (`Q`), all `arta_*` tmux sessions are killed
 
@@ -164,11 +171,6 @@ Disable in System Settings → Keyboard → Keyboard Shortcuts → Input Sources
 | Linux | Works |
 | Windows + WSL | Works (it's Linux) |
 | Windows native | Not supported (no tmux) |
-
-## Documentation
-
-- [Architecture Notes](docs/architecture.md) — design decisions and known issues
-- [Implementation Log](docs/implementation-log.md) — bugs, fixes, and learnings
 
 ## License
 

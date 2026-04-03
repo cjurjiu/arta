@@ -102,6 +102,10 @@ pub fn render_welcome(area: Rect, buf: &mut Buffer) {
         " agent runtime terminal application",
         dim,
     )));
+    lines.push(Line::from(Span::styled(
+        format!("              v{}", env!("CARGO_PKG_VERSION")),
+        dim,
+    )));
     lines.push(Line::from(""));
 
     // Top frame border
