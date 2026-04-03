@@ -2,9 +2,9 @@
 
 <code><u>a</u>gent <u>r</u>untime <u>t</u>erminal <u>a</u>pplication</code>
 
-A terminal workspace manager for parallel AI coding agents. Organize projects in a sidebar, manage multiple tmux-backed sessions, and switch between them — all from a single binary.
+Terminal workspace manager for concurrent AI coding agent usage. Enables parallel agent usage over a single SSH session.
 
-> **Status:** Early prototype. Rewritten in Rust with [Ratatui](https://ratatui.rs/) for low-latency terminal embedding.
+Organize projects in a sidebar, manage multiple tmux-backed sessions, and switch between them — all from a single binary. Close, reopen and continue from where you left off.
 
 ```
  ┌────────────────┬─────────────────────────────────────────────┐
@@ -174,4 +174,4 @@ Disable in System Settings → Keyboard → Keyboard Shortcuts → Input Sources
 
 ## License
 
-MIT
+MIT. PRs are welcome.
