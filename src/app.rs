@@ -902,18 +902,18 @@ impl App {
                 Span::styled(" - ", gray),
                 Span::styled(version_text, gray),
                 Span::styled(" | ", gray),
-                Span::styled("g", Style::default().fg(Color::Rgb(0x88, 0x88, 0x88)).add_modifier(Modifier::BOLD)),
+                Span::styled("MIT", gray),
+                Span::styled(" | ", gray),
+                Span::styled("g", gray.add_modifier(Modifier::BOLD)),
                 Span::styled(" - github ", gray),
             ]);
-            let bar_width: u16 = 36;
+            let bar_width: u16 = 42;
             let bar_x = right_x + right_width.saturating_sub(bar_width);
             frame.buffer_mut().set_line(bar_x, version_y, &bar, bar_width);
 
             // Timed message (left side of same row)
             if let Some((msg, _)) = &self.timed_message {
-                let msg_style = Style::default()
-                    .fg(Color::Rgb(0x98, 0xBE, 0x65))
-                    .add_modifier(Modifier::DIM);
+                let msg_style = Style::default();
                 frame.buffer_mut().set_line(
                     right_x,
                     version_y,
