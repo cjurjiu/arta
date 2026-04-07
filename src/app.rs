@@ -1059,7 +1059,7 @@ impl App {
         };
 
         let col = mouse.column.saturating_sub(SIDEBAR_WIDTH + 1) + 1;
-        let row = mouse.row + 1;
+        let row = mouse.row.saturating_sub(1) + 1;
 
         let (button, suffix) = match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => (0, 'M'),
