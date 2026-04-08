@@ -38,36 +38,23 @@ impl MultiplexerBackend for TmuxBackend {
     }
 
     fn create_session(&self, name: &str, dir: &str, agent_command: &str) {
-        // Single window with a horizontal split: agent (top 75%) + terminal (bottom 25%)
+        // Single window with top/bottom split: agent (top 75%) + terminal (bottom 25%).
+        // Avoid hardcoded window/pane indices — they depend on the user's
+        // base-index and pane-base-index settings.
         let _ = Command::new("tmux")
             .args(["new-session", "-d", "-s", name, "-c", dir])
             .output();
-        // Split the window horizontally — the new pane (bottom) gets 25%
+        // Split top/bottom — the new (bottom) pane gets 25%
         let _ = Command::new("tmux")
-            .args([
-                "split-window",
-                "-v",
-                "-t",
-                &format!("{}:0", name),
-                "-p",
-                "25",
-                "-c",
-                dir,
-            ])
+            .args(["split-window", "-v", "-t", name, "-l", "25%", "-c", dir])
             .output();
-        // Send the agent command to the top pane (pane 0)
+        // After split, the bottom pane is active. Select the top pane first,
+        // then send the agent command to it.
         let _ = Command::new("tmux")
-            .args([
-                "send-keys",
-                "-t",
-                &format!("{}:0.0", name),
-                agent_command,
-                "Enter",
-            ])
+            .args(["select-pane", "-t", name, "-U"])
             .output();
-        // Focus the top pane (agent)
         let _ = Command::new("tmux")
-            .args(["select-pane", "-t", &format!("{}:0.0", name)])
+            .args(["send-keys", "-t", name, agent_command, "Enter"])
             .output();
         let _ = Command::new("tmux")
             .args(["set-option", "-t", name, "mouse", "on"])
