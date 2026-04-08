@@ -6,7 +6,8 @@ pub trait MultiplexerBackend {
 
     /// Create a new session with the given name in the given directory,
     /// launching the agent command in the primary window/tab.
-    fn create_session(&self, name: &str, dir: &str, agent_command: &str);
+    /// `rows` and `cols` are the PTY dimensions for accurate split sizing.
+    fn create_session(&self, name: &str, dir: &str, agent_command: &str, rows: u16, cols: u16);
 
     /// List all multiplexer sessions whose name starts with `name_prefix`.
     fn list_sessions(&self, name_prefix: &str) -> Vec<String>;
@@ -26,6 +27,10 @@ pub trait MultiplexerBackend {
 
     /// The command + args to attach to a session (for PTY spawning).
     fn attach_command(&self, session_name: &str) -> (String, Vec<String>);
+
+    /// Optional setup to run after the PTY connects to a new session.
+    /// Called on a background thread. Default: no-op.
+    fn post_attach_setup(&self, _name: &str, _dir: &str, _agent_command: &str, _rows: u16) {}
 }
 
 // ---------- Tmux ----------
@@ -37,21 +42,38 @@ impl MultiplexerBackend for TmuxBackend {
         "t"
     }
 
-    fn create_session(&self, name: &str, dir: &str, agent_command: &str) {
+    fn create_session(&self, name: &str, dir: &str, agent_command: &str, rows: u16, cols: u16) {
         // Single window with top/bottom split: agent (top 75%) + terminal (bottom 25%).
-        // Avoid hardcoded window/pane indices — they depend on the user's
-        // base-index and pane-base-index settings.
+        // Create at the exact PTY dimensions so the split ratio is correct
+        // from the start (before the PTY attaches and resizes the session).
+        let rows_str = rows.to_string();
+        let cols_str = cols.to_string();
         let _ = Command::new("tmux")
-            .args(["new-session", "-d", "-s", name, "-c", dir])
+            .args([
+                "new-session", "-d", "-s", name, "-x", &cols_str, "-y", &rows_str, "-c", dir,
+            ])
             .output();
-        // Split top/bottom — the new (bottom) pane gets 25%
+        // Split top/bottom — the new (bottom) pane gets 25%.
+        // Minimum 3 rows for the bottom pane; skip the split entirely if the
+        // window is too small to fit both panes (need at least 3+1+3 = 7 rows).
+        let bottom = (rows / 4).max(3);
+        if rows >= 7 {
+            let _ = Command::new("tmux")
+                .args([
+                    "split-window", "-v", "-t", name, "-l", &bottom.to_string(), "-c", dir,
+                ])
+                .output();
+        }
+        // After split, the bottom pane is active. Name it, then select the
+        // top pane, name it, and send the agent command.
         let _ = Command::new("tmux")
-            .args(["split-window", "-v", "-t", name, "-l", "25%", "-c", dir])
+            .args(["select-pane", "-t", name, "-T", "terminal"])
             .output();
-        // After split, the bottom pane is active. Select the top pane first,
-        // then send the agent command to it.
         let _ = Command::new("tmux")
             .args(["select-pane", "-t", name, "-U"])
+            .output();
+        let _ = Command::new("tmux")
+            .args(["select-pane", "-t", name, "-T", "agent"])
             .output();
         let _ = Command::new("tmux")
             .args(["send-keys", "-t", name, agent_command, "Enter"])
@@ -62,15 +84,7 @@ impl MultiplexerBackend for TmuxBackend {
         let _ = Command::new("tmux")
             .args(["set-option", "-t", name, "monitor-activity", "on"])
             .output();
-        let _ = Command::new("tmux")
-            .args(["set-window-option", "-t", name, "monitor-bell", "on"])
-            .output();
-        let _ = Command::new("tmux")
-            .args(["set-option", "-t", name, "bell-action", "any"])
-            .output();
-        let _ = Command::new("tmux")
-            .args(["set-option", "-t", name, "visual-bell", "off"])
-            .output();
+        self.apply_bell_settings(name);
     }
 
     fn list_sessions(&self, name_prefix: &str) -> Vec<String> {
@@ -160,35 +174,11 @@ impl MultiplexerBackend for ZellijBackend {
         "z"
     }
 
-    fn create_session(&self, name: &str, dir: &str, agent_command: &str) {
-        // Write a temporary layout file for a vertical split: agent (75%) on top,
-        // terminal (25%) on bottom.
-        let layout = format!(
-            r#"layout {{
-    pane size="75%" command="{}" cwd="{}"
-    pane size="25%" cwd="{}"
-}}"#,
-            agent_command, dir, dir
-        );
-        let layout_path = std::env::temp_dir().join(format!("arta-zellij-{}.kdl", name));
-        let _ = std::fs::write(&layout_path, &layout);
-
-        let _ = Command::new("zellij")
-            .args([
-                "--session",
-                name,
-                "--layout",
-                &layout_path.display().to_string(),
-            ])
-            .current_dir(dir)
-            .env("ZELLIJ_AUTO_EXIT", "true")
-            .spawn()
-            .and_then(|mut child| {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                child.kill()
-            });
-
-        let _ = std::fs::remove_file(&layout_path);
+    fn create_session(&self, name: &str, _dir: &str, _agent_command: &str, _rows: u16, _cols: u16) {
+        // Zellij actions don't work on detached sessions (no connected client).
+        // Session setup (dismiss About popup, split, send agent command) is
+        // done after the PTY connects — see ZellijBackend::setup_new_session().
+        let _ = name;
     }
 
     fn list_sessions(&self, name_prefix: &str) -> Vec<String> {
@@ -234,13 +224,44 @@ impl MultiplexerBackend for ZellijBackend {
     fn attach_command(&self, session_name: &str) -> (String, Vec<String>) {
         (
             "zellij".to_string(),
-            vec!["attach".to_string(), session_name.to_string()],
+            vec![
+                "attach".to_string(),
+                "--create".to_string(),
+                session_name.to_string(),
+            ],
         )
+    }
+
+    fn post_attach_setup(&self, name: &str, dir: &str, agent_command: &str, rows: u16) {
+        let zj = |args: &[&str]| {
+            let mut full_args = vec!["-s", name];
+            full_args.extend_from_slice(args);
+            let _ = Command::new("zellij").args(&full_args).output();
+        };
+
+        // Dismiss the "About Zellij" startup floating pane
+        zj(&["action", "close-pane"]);
+        // cd + launch agent in the main pane
+        zj(&["action", "write-chars", &format!("cd {} && clear", dir)]);
+        zj(&["action", "write", "10"]);
+        zj(&["action", "write-chars", agent_command]);
+        zj(&["action", "write", "10"]);
+        // Split: bottom pane for terminal (gets focus after creation)
+        zj(&["action", "new-pane", "--direction", "down", "--name", "terminal"]);
+        // cd + clear the bottom pane
+        zj(&["action", "write-chars", &format!("cd {} && clear", dir)]);
+        zj(&["action", "write", "10"]);
+        // Resize top pane to 75%: focus it, then increase downward
+        zj(&["action", "focus-previous-pane"]);
+        let steps = (rows / 4).max(1);
+        for _ in 0..steps {
+            zj(&["action", "resize", "increase", "down"]);
+        }
     }
 }
 
 /// Instantiate the appropriate backend for the given multiplexer choice.
-pub fn backend_for(mux: crate::config::Multiplexer) -> Box<dyn MultiplexerBackend> {
+pub fn backend_for(mux: crate::config::Multiplexer) -> Box<dyn MultiplexerBackend + Send> {
     match mux {
         crate::config::Multiplexer::Tmux => Box::new(TmuxBackend),
         crate::config::Multiplexer::Zellij => Box::new(ZellijBackend),

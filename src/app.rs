@@ -855,16 +855,22 @@ impl App {
             path
         };
 
+        let (pane_cols, pane_rows) = self.pane_size();
+
         if let Some(ref script) = self.config.multiplexer_init_script {
             let _ = std::process::Command::new(script)
                 .args([&full_name, &dir])
                 .output();
         } else {
-            self.mux
-                .create_session(&full_name, &dir, &self.config.coding_agent_command);
+            self.mux.create_session(
+                &full_name,
+                &dir,
+                &self.config.coding_agent_command,
+                pane_rows,
+                pane_cols,
+            );
         }
 
-        let (pane_cols, pane_rows) = self.pane_size();
         let (cmd, args) = self.mux.attach_command(&full_name);
         if let Ok(pane) = TerminalPane::new(
             session.id.clone(),
@@ -874,6 +880,19 @@ impl App {
             pane_cols,
             self.bell_tx.clone(),
         ) {
+            // Run any post-attach setup on a background thread (e.g. zellij
+            // needs to dismiss popups, split panes, and send the agent command
+            // after the PTY connects).
+            if self.config.multiplexer_init_script.is_none() {
+                let mux = multiplexer::backend_for(self.config.multiplexer);
+                let setup_name = full_name.clone();
+                let setup_dir = dir.clone();
+                let setup_agent = self.config.coding_agent_command.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    mux.post_attach_setup(&setup_name, &setup_dir, &setup_agent, pane_rows);
+                });
+            }
             self.panes.insert(session.id.clone(), pane);
             self.active_session = Some(session.id.clone());
             self.workspace.set_active_session(Some(&session.id));
