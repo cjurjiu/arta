@@ -38,27 +38,36 @@ impl MultiplexerBackend for TmuxBackend {
     }
 
     fn create_session(&self, name: &str, dir: &str, agent_command: &str) {
+        // Single window with a horizontal split: agent (top 75%) + terminal (bottom 25%)
         let _ = Command::new("tmux")
-            .args(["new-session", "-d", "-s", name, "-n", agent_command, "-c", dir])
+            .args(["new-session", "-d", "-s", name, "-c", dir])
             .output();
+        // Split the window horizontally — the new pane (bottom) gets 25%
+        let _ = Command::new("tmux")
+            .args([
+                "split-window",
+                "-v",
+                "-t",
+                &format!("{}:0", name),
+                "-p",
+                "25",
+                "-c",
+                dir,
+            ])
+            .output();
+        // Send the agent command to the top pane (pane 0)
         let _ = Command::new("tmux")
             .args([
                 "send-keys",
                 "-t",
-                &format!("{}:{}", name, agent_command),
+                &format!("{}:0.0", name),
                 agent_command,
                 "Enter",
             ])
             .output();
+        // Focus the top pane (agent)
         let _ = Command::new("tmux")
-            .args(["new-window", "-t", name, "-n", "terminal", "-c", dir])
-            .output();
-        let _ = Command::new("tmux")
-            .args([
-                "select-window",
-                "-t",
-                &format!("{}:{}", name, agent_command),
-            ])
+            .args(["select-pane", "-t", &format!("{}:0.0", name)])
             .output();
         let _ = Command::new("tmux")
             .args(["set-option", "-t", name, "mouse", "on"])
@@ -165,40 +174,34 @@ impl MultiplexerBackend for ZellijBackend {
     }
 
     fn create_session(&self, name: &str, dir: &str, agent_command: &str) {
-        // Create a zellij session in the background with a default layout.
-        // Zellij doesn't support detached creation natively, so we use
-        // `zellij run` to set up tabs similar to tmux's window approach.
-        let _ = Command::new("zellij")
-            .args(["--session", name])
-            .current_dir(dir)
-            .env("ZELLIJ_AUTO_EXIT", "true")
-            .spawn()
-            .and_then(|mut child| {
-                // Give zellij a moment to start, then send agent command
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                child.kill()
-            });
+        // Write a temporary layout file for a vertical split: agent (75%) on top,
+        // terminal (25%) on bottom.
+        let layout = format!(
+            r#"layout {{
+    pane size="75%" command="{}" cwd="{}"
+    pane size="25%" cwd="{}"
+}}"#,
+            agent_command, dir, dir
+        );
+        let layout_path = std::env::temp_dir().join(format!("arta-zellij-{}.kdl", name));
+        let _ = std::fs::write(&layout_path, &layout);
 
-        // Use zellij action to run the agent in the first tab
         let _ = Command::new("zellij")
             .args([
                 "--session",
                 name,
-                "action",
-                "write-chars",
-                &format!("{}\n", agent_command),
+                "--layout",
+                &layout_path.display().to_string(),
             ])
-            .output();
+            .current_dir(dir)
+            .env("ZELLIJ_AUTO_EXIT", "true")
+            .spawn()
+            .and_then(|mut child| {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                child.kill()
+            });
 
-        // Create a second tab for the terminal
-        let _ = Command::new("zellij")
-            .args(["--session", name, "action", "new-tab"])
-            .output();
-
-        // Go back to first tab
-        let _ = Command::new("zellij")
-            .args(["--session", name, "action", "go-to-tab", "1"])
-            .output();
+        let _ = std::fs::remove_file(&layout_path);
     }
 
     fn list_sessions(&self, name_prefix: &str) -> Vec<String> {
