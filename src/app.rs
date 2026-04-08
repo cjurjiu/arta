@@ -9,11 +9,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 
+use crate::config::{self, Config};
 use crate::input_panel::{InputAction, InputMode, InputPanel};
 use crate::keys;
+use crate::multiplexer::{self, MultiplexerBackend};
 use crate::sidebar::{Sidebar, SidebarAction};
 use crate::terminal_pane::{PaneEvent, TerminalPane};
-use crate::tmux;
 use crate::welcome;
 use crate::workspace::{self, Workspace};
 
@@ -172,6 +173,10 @@ enum ConfigMenuResult {
 }
 
 pub struct App {
+    config: Config,
+    mux: Box<dyn MultiplexerBackend>,
+    session_prefix: String,
+    session_name_prefix: String,
     sidebar: Sidebar,
     panes: HashMap<String, TerminalPane>,
     input_panel: InputPanel,
@@ -197,14 +202,49 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        let mut workspace = Workspace::new();
+        let cfg = Config::load();
+        let mux = multiplexer::backend_for(cfg.multiplexer);
+        let session_prefix = config::session_prefix();
+        let session_name_prefix =
+            config::session_name_prefix(&session_prefix, mux.tag());
+
+        // Migrate workspace from legacy location if needed
+        let ws_path = config::workspace_path();
+        workspace::migrate_workspace_if_needed(&ws_path);
+
+        let mut workspace = Workspace::new(ws_path);
         let _ = workspace.load();
 
+        // Auto-migrate old-format session names (arta_X -> arta_t_X)
+        Self::migrate_old_sessions(&workspace, &session_prefix, mux.tag());
+
+        // Warn about sessions from the other multiplexer
+        let other_tag = if mux.tag() == "t" { "z" } else { "t" };
+        let other_prefix = config::session_name_prefix(&session_prefix, other_tag);
+        let other_mux = if mux.tag() == "t" {
+            multiplexer::backend_for(config::Multiplexer::Zellij)
+        } else {
+            multiplexer::backend_for(config::Multiplexer::Tmux)
+        };
+        let other_sessions = other_mux.list_sessions(&other_prefix);
+        let timed_message = if other_sessions.is_empty() {
+            None
+        } else {
+            Some((
+                format!(
+                    "{} session(s) from other multiplexer still running",
+                    other_sessions.len()
+                ),
+                Instant::now(),
+            ))
+        };
+
         // Prune dead sessions
-        let live = tmux::list_sessions();
-        workspace
-            .sessions
-            .retain(|s| live.contains(&tmux::session_name(&s.id)));
+        let live = mux.list_sessions(&session_name_prefix);
+        workspace.sessions.retain(|s| {
+            let full = config::full_session_name(&s.id, &session_prefix, mux.tag());
+            live.contains(&full)
+        });
         let _ = workspace.save();
 
         // Get actual terminal size so PTYs are created at the right dimensions
@@ -220,13 +260,15 @@ impl App {
         // Eagerly attach PTYs for all surviving sessions
         let mut panes = HashMap::new();
         for session in &workspace.sessions {
-            let tmux_name = tmux::session_name(&session.id);
-            // Re-apply bell settings on every attach (user's global tmux.conf
-            // may override session-level settings between restarts)
-            tmux::apply_bell_settings(&tmux_name);
+            let full_name =
+                config::full_session_name(&session.id, &session_prefix, mux.tag());
+            // Re-apply bell settings on every attach
+            mux.apply_bell_settings(&full_name);
+            let (cmd, args) = mux.attach_command(&full_name);
             if let Ok(pane) = TerminalPane::new(
                 session.id.clone(),
-                &tmux_name,
+                &cmd,
+                &args,
                 pane_height,
                 pane_width,
                 bell_tx.clone(),
@@ -268,6 +310,10 @@ impl App {
         }
 
         App {
+            config: cfg,
+            mux,
+            session_prefix,
+            session_name_prefix,
             sidebar,
             panes,
             input_panel,
@@ -279,7 +325,7 @@ impl App {
             pending_path: None,
             pending_name: None,
             status_message: None,
-            timed_message: None,
+            timed_message,
             config_menu: None,
             prefix_active: false,
             bell_tx,
@@ -289,6 +335,27 @@ impl App {
             width: term_w,
             height: term_h,
             should_quit: false,
+        }
+    }
+
+    /// Rename old-format tmux sessions (arta_X) to the new format (arta_t_X).
+    fn migrate_old_sessions(workspace: &Workspace, prefix: &str, tag: &str) {
+        let tmux = multiplexer::TmuxBackend;
+        // List all tmux sessions starting with "arta_"
+        let all = tmux.list_sessions("arta_");
+        let new_prefix = config::session_name_prefix(prefix, tag);
+        for full_name in &all {
+            // Skip sessions that already match the new format
+            if full_name.starts_with(&new_prefix) {
+                continue;
+            }
+            // Check if this is an old-format name for a known session
+            if let Some(session_id) = full_name.strip_prefix("arta_") {
+                if workspace.sessions.iter().any(|s| s.id == session_id) {
+                    let new_name = config::full_session_name(session_id, prefix, tag);
+                    tmux.rename_session(full_name, &new_name);
+                }
+            }
         }
     }
 
@@ -565,7 +632,12 @@ impl App {
                     self.workspace.sessions.iter().map(|s| s.id.clone()).collect();
                 self.panes.clear();
                 for id in &session_ids {
-                    tmux::kill_session(&tmux::session_name(id));
+                    let full = config::full_session_name(
+                        id,
+                        &self.session_prefix,
+                        self.mux.tag(),
+                    );
+                    self.mux.kill_session(&full);
                 }
                 self.workspace.sessions.clear();
                 let _ = self.workspace.save();
@@ -649,10 +721,17 @@ impl App {
                                 Instant::now(),
                             ));
                         } else {
-                            tmux::rename_session(
-                                &tmux::session_name(&old_id),
-                                &tmux::session_name(&new_id),
+                            let old_full = config::full_session_name(
+                                &old_id,
+                                &self.session_prefix,
+                                self.mux.tag(),
                             );
+                            let new_full = config::full_session_name(
+                                &new_id,
+                                &self.session_prefix,
+                                self.mux.tag(),
+                            );
+                            self.mux.rename_session(&old_full, &new_full);
 
                             if let Some(pane) = self.panes.remove(&old_id) {
                                 self.panes.insert(new_id.clone(), pane);
@@ -684,7 +763,12 @@ impl App {
                             .map(|s| s.id.clone())
                             .collect();
                         for sid in &session_ids {
-                            tmux::kill_session(&tmux::session_name(sid));
+                            let full = config::full_session_name(
+                                sid,
+                                &self.session_prefix,
+                                self.mux.tag(),
+                            );
+                            self.mux.kill_session(&full);
                             self.detach_pane(sid);
                         }
                         self.workspace.remove_project(&name);
@@ -755,7 +839,11 @@ impl App {
             None => return,
         };
 
-        let tmux_name = tmux::session_name(&session.id);
+        let full_name = config::full_session_name(
+            &session.id,
+            &self.session_prefix,
+            self.mux.tag(),
+        );
         let path = self
             .workspace
             .get_project_path(project_name)
@@ -767,12 +855,21 @@ impl App {
             path
         };
 
-        tmux::create_session(&tmux_name, &dir);
+        if let Some(ref script) = self.config.multiplexer_init_script {
+            let _ = std::process::Command::new(script)
+                .args([&full_name, &dir])
+                .output();
+        } else {
+            self.mux
+                .create_session(&full_name, &dir, &self.config.coding_agent_command);
+        }
 
         let (pane_cols, pane_rows) = self.pane_size();
+        let (cmd, args) = self.mux.attach_command(&full_name);
         if let Ok(pane) = TerminalPane::new(
             session.id.clone(),
-            &tmux_name,
+            &cmd,
+            &args,
             pane_rows,
             pane_cols,
             self.bell_tx.clone(),
@@ -788,7 +885,8 @@ impl App {
     }
 
     fn close_session(&mut self, id: &str) {
-        tmux::kill_session(&tmux::session_name(id));
+        let full = config::full_session_name(id, &self.session_prefix, self.mux.tag());
+        self.mux.kill_session(&full);
         self.detach_pane(id);
         self.workspace.remove_session(id);
         self.sidebar.refresh(&self.workspace);
@@ -834,15 +932,23 @@ impl App {
             }
         }
 
-        // Poll tmux for bell flags every 500ms (skip if no sessions)
+        // Poll multiplexer for bell flags every 500ms (skip if no sessions)
         if !self.panes.is_empty() && self.last_bell_poll.elapsed() >= Duration::from_millis(500) {
             self.last_bell_poll = Instant::now();
-            let flags = tmux::check_bell_flags();
-            for (session_id, has_bell) in flags {
+            let flags = self.mux.check_bell_flags(&self.session_name_prefix);
+            for (full_name, has_bell) in flags {
+                let session_id = match config::extract_session_id(
+                    &full_name,
+                    &self.session_prefix,
+                    self.mux.tag(),
+                ) {
+                    Some(id) => id,
+                    None => continue,
+                };
                 if has_bell {
                     if !self.bell_notified.contains(&session_id) {
                         self.bell_notified.insert(session_id.clone());
-                        if self.active_session.as_deref() != Some(&session_id) {
+                        if self.active_session.as_deref() != Some(session_id.as_str()) {
                             bell_log(&format!(
                                 "bell: session={} (notifying, active={:?})",
                                 session_id, self.active_session

@@ -1,9 +1,10 @@
 mod app;
+mod config;
 mod input_panel;
 mod keys;
+mod multiplexer;
 mod sidebar;
 mod terminal_pane;
-mod tmux;
 mod welcome;
 mod workspace;
 

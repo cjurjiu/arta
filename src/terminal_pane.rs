@@ -29,7 +29,8 @@ pub struct TerminalPane {
 impl TerminalPane {
     pub fn new(
         session_id: String,
-        tmux_name: &str,
+        attach_cmd: &str,
+        attach_args: &[String],
         rows: u16,
         cols: u16,
         bell_tx: Sender<PaneEvent>,
@@ -43,8 +44,8 @@ impl TerminalPane {
         };
         let pair = pty_system.openpty(size)?;
 
-        let mut cmd = CommandBuilder::new("tmux");
-        cmd.args(["attach-session", "-t", tmux_name]);
+        let mut cmd = CommandBuilder::new(attach_cmd);
+        cmd.args(attach_args);
 
         pair.slave.spawn_command(cmd)?;
         // Drop the slave side — we only need the master

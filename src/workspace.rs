@@ -42,17 +42,13 @@ pub fn sanitize_name(s: &str) -> String {
 }
 
 impl Workspace {
-    pub fn new() -> Self {
-        let dir = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("arta")
-            .join("data");
+    pub fn new(file_path: PathBuf) -> Self {
         Workspace {
             projects: Vec::new(),
             sessions: Vec::new(),
             active_session: None,
             next_session_id: 0,
-            file_path: dir.join("workspace.json"),
+            file_path,
         }
     }
 
@@ -62,7 +58,7 @@ impl Workspace {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
         };
-        let loaded: Workspace = serde_json::from_str(&data)?;
+        let loaded: Workspace = serde_yaml::from_str(&data)?;
         self.projects = loaded.projects;
         self.sessions = loaded.sessions;
         self.active_session = loaded.active_session;
@@ -74,7 +70,7 @@ impl Workspace {
         if let Some(dir) = self.file_path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let data = serde_json::to_string_pretty(self)?;
+        let data = serde_yaml::to_string(self)?;
         fs::write(&self.file_path, data)?;
         Ok(())
     }
@@ -212,10 +208,45 @@ impl Workspace {
 
     pub fn set_project_open_command(&mut self, name: &str, cmd: &str) {
         if let Some(p) = self.projects.iter_mut().find(|p| p.name == name) {
-            p.open_command = if cmd.is_empty() { None } else { Some(cmd.to_string()) };
+            p.open_command = if cmd.is_empty() {
+                None
+            } else {
+                Some(cmd.to_string())
+            };
             let _ = self.save();
         }
     }
+}
+
+/// Migrate workspace from the legacy JSON location to the new YAML path.
+///
+/// If `new_path` already exists, does nothing.
+/// Otherwise checks `~/.config/arta/data/workspace.json` and converts it.
+pub fn migrate_workspace_if_needed(new_path: &std::path::Path) -> bool {
+    if new_path.exists() {
+        return false;
+    }
+    let legacy = dirs::config_dir()
+        .map(|d| d.join("arta").join("data").join("workspace.json"));
+    let Some(legacy_path) = legacy else {
+        return false;
+    };
+    if !legacy_path.exists() {
+        return false;
+    }
+    let Ok(data) = fs::read_to_string(&legacy_path) else {
+        return false;
+    };
+    let Ok(loaded) = serde_json::from_str::<Workspace>(&data) else {
+        return false;
+    };
+    if let Some(parent) = new_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let Ok(yaml) = serde_yaml::to_string(&loaded) else {
+        return false;
+    };
+    fs::write(new_path, yaml).is_ok()
 }
 
 fn chrono_now() -> String {
@@ -287,19 +318,9 @@ mod tests {
 
     fn temp_workspace() -> Workspace {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "arta-test-{}-{}",
-            std::process::id(),
-            id
-        ));
+        let dir = std::env::temp_dir().join(format!("arta-test-{}-{}", std::process::id(), id));
         let _ = fs::create_dir_all(&dir);
-        Workspace {
-            projects: Vec::new(),
-            sessions: Vec::new(),
-            active_session: None,
-            next_session_id: 0,
-            file_path: dir.join("workspace.json"),
-        }
+        Workspace::new(dir.join("workspace.yaml"))
     }
 
     #[test]
@@ -346,16 +367,13 @@ mod tests {
     }
 
     #[test]
-    fn test_json_roundtrip() {
+    fn test_yaml_roundtrip() {
         let mut ws = temp_workspace();
         ws.add_project("proj", "/tmp/proj", None);
         ws.create_session("proj");
         ws.save().unwrap();
 
-        let mut ws2 = Workspace {
-            file_path: ws.file_path.clone(),
-            ..Default::default()
-        };
+        let mut ws2 = Workspace::new(ws.file_path.clone());
         ws2.load().unwrap();
         assert_eq!(ws2.projects.len(), 1);
         assert_eq!(ws2.sessions.len(), 1);
@@ -374,5 +392,42 @@ mod tests {
         ws.swap_projects(0, 1);
         assert_eq!(ws.projects[0].name, "b");
         assert_eq!(ws.projects[1].name, "a");
+    }
+
+    #[test]
+    fn test_migrate_from_json() {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("arta-migrate-{}-{}", std::process::id(), id));
+
+        // Create a legacy JSON file
+        let legacy_dir = base.join("legacy");
+        let _ = fs::create_dir_all(&legacy_dir);
+        let json = r#"{
+  "projects": [{"name": "test", "path": "/tmp/test"}],
+  "sessions": [{"id": "test-1", "project": "test", "created": "2026-01-01T00:00:00Z"}],
+  "active_session": "test-1",
+  "next_session_id": 1
+}"#;
+        fs::write(legacy_dir.join("workspace.json"), json).unwrap();
+
+        // New YAML path
+        let new_dir = base.join("new");
+        let _ = fs::create_dir_all(&new_dir);
+        let new_path = new_dir.join("workspace.yaml");
+
+        // Cannot use migrate_workspace_if_needed directly since it checks
+        // dirs::config_dir(). Test the JSON-to-YAML conversion logic instead.
+        let loaded: Workspace =
+            serde_json::from_str(json).unwrap();
+        let yaml = serde_yaml::to_string(&loaded).unwrap();
+        fs::write(&new_path, &yaml).unwrap();
+
+        let mut ws = Workspace::new(new_path.clone());
+        ws.load().unwrap();
+        assert_eq!(ws.projects.len(), 1);
+        assert_eq!(ws.projects[0].name, "test");
+        assert_eq!(ws.sessions[0].id, "test-1");
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
