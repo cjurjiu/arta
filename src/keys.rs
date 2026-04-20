@@ -29,6 +29,20 @@ pub fn key_event_to_bytes(event: &KeyEvent) -> Option<Vec<u8>> {
         }
     }
 
+    // Alt+char → ESC + char (readline meta prefix, e.g. Alt+b, Alt+f for word nav)
+    if event.modifiers.contains(KeyModifiers::ALT)
+        && !event.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        if let KeyCode::Char(c) = event.code {
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            let mut out = Vec::with_capacity(1 + s.len());
+            out.push(0x1b);
+            out.extend_from_slice(s.as_bytes());
+            return Some(out);
+        }
+    }
+
     match event.code {
         // Printable characters
         KeyCode::Char(c) if event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT => {
@@ -136,6 +150,15 @@ mod tests {
     fn test_arrows() {
         assert_eq!(key_event_to_bytes(&key(KeyCode::Up)), Some(b"\x1b[A".to_vec()));
         assert_eq!(key_event_to_bytes(&key(KeyCode::Down)), Some(b"\x1b[B".to_vec()));
+    }
+
+    #[test]
+    fn test_alt_char() {
+        // Option+Left in iTerm2 sends ESC+b; crossterm reports it as Alt+b
+        let alt_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT);
+        assert_eq!(key_event_to_bytes(&alt_b), Some(vec![0x1b, b'b']));
+        let alt_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT);
+        assert_eq!(key_event_to_bytes(&alt_f), Some(vec![0x1b, b'f']));
     }
 
     #[test]
