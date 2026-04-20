@@ -20,7 +20,7 @@ Organize projects in a sidebar, manage multiple tmux or zellij-backed sessions, 
  │ ▼ fe-web1 (1)  │                                             │
  │   session-1 *  │  $ █                                        │
  │                │ focused ─────────────────────────────────── │
- │ ---------------│               interactive | v0.1.0 | MIT   │
+ │ ---------------│               interactive | v0.2.0 | MIT   │
  │ ctrl+space run │ [] 1 claude * - 2 zsh       2026-04-02 18:27│
  │ J/K reorder    │                                             │
  └────────────────┴─────────────────────────────────────────────┘
@@ -37,7 +37,7 @@ Organize projects in a sidebar, manage multiple tmux or zellij-backed sessions, 
 - **Multiple profiles** — use `ARTA_CONFIG_ROOT` and `ARTA_SESSION_PREFIX` env vars to run independent ARTA instances with separate configs and sessions
 - **Open IDE** — press `o` to launch your configured IDE (e.g., `webstorm .`, `idea .`) for any project
 - **Project configuration** — press `c` to configure project name, path, or open command via a navigable menu
-- **Bell detection** — detects BEL character inline from PTY output, shows indicator + plays sound
+- **Bell notifications** — focus-aware bells via a Claude Code `Notification` hook (auto-installed into `~/.claude/settings.json`); shows a sidebar indicator and plays a sound for unfocused sessions, reliable across tmux and zellij
 - **Nerd Font detection** — auto-detects and uses icons when available, falls back to Unicode
 - **Full-width input panel** — tab-complete paths, browse directories, rename with full cursor support
 - **Single binary** — built with [Ratatui](https://ratatui.rs/) + [tui-term](https://github.com/a-kenji/tui-term) + [portable-pty](https://docs.rs/portable-pty)
@@ -202,7 +202,7 @@ ARTA (Rust binary)
 - Each session has its own **PTY** (via `portable-pty`) attached to its multiplexer session
 - A background **reader thread** per session feeds PTY output into a `vt100::Parser`
 - **Switching sessions** just changes which parser's screen is rendered — instant, no teardown
-- **Bell detection** is inline: when BEL (0x07) appears in PTY output, the reader thread notifies the main thread
+- **Bell notifications** are driven by a Claude Code `Notification` hook (merged idempotently into `~/.claude/settings.json`) that touches a marker file under `~/.local/share/arta/bells/` for the current multiplexer session; ARTA polls that directory and raises attention for unfocused sessions. Raw PTY BEL is also handled as a fallback.
 - **Key input** is written directly to the active PTY's master fd — no message queue, minimal latency
 - **Session restore** — the last active session is saved to `workspace.yaml` and auto-reopened on startup; falls back to the first alive session if the saved one is gone
 - When you **quit** (`q`), multiplexer sessions stay alive — reopen ARTA to reattach
