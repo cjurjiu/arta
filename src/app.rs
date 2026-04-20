@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -9,6 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 
+use crate::claude_hook;
 use crate::config::{self, Config};
 use crate::input_panel::{InputAction, InputMode, InputPanel};
 use crate::keys;
@@ -194,7 +195,6 @@ pub struct App {
     bell_tx: mpsc::Sender<PaneEvent>,
     bell_rx: mpsc::Receiver<PaneEvent>,
     last_bell_poll: Instant,
-    bell_notified: HashSet<String>,
     width: u16,
     height: u16,
     should_quit: bool,
@@ -257,6 +257,17 @@ impl App {
         let pane_width = term_w.saturating_sub(SIDEBAR_WIDTH + 1).max(10);
         let pane_height = term_h.saturating_sub(4).max(5);
 
+        // Inject claude-code's Notification hook into user-scope settings once per
+        // arta launch. Idempotent — safe to re-run. The hook writes to the per-session
+        // ARTA_BELL_MARKER env var (set by the multiplexer at session create time);
+        // if that env var isn't set (e.g. claude invoked outside arta), the hook is
+        // a no-op.
+        if cfg.coding_agent_command.split_whitespace().next().unwrap_or("").contains("claude") {
+            if let Err(e) = claude_hook::ensure_user_notify_hook() {
+                bell_log(&format!("claude_hook: ensure_user_notify_hook failed: {}", e));
+            }
+        }
+
         // Eagerly attach PTYs for all surviving sessions
         let mut panes = HashMap::new();
         for session in &workspace.sessions {
@@ -264,6 +275,20 @@ impl App {
                 config::full_session_name(&session.id, &session_prefix, mux.tag());
             // Re-apply bell settings on every attach
             mux.apply_bell_settings(&full_name);
+            // (Re)export the marker into the tmux session environment so any
+            // newly-spawned process (e.g. claude restarted by the user) inherits it.
+            if mux.tag() == "t" {
+                let marker = multiplexer::bell_marker_path(&full_name);
+                let _ = std::process::Command::new("tmux")
+                    .args([
+                        "set-environment",
+                        "-t",
+                        &full_name,
+                        "ARTA_BELL_MARKER",
+                        &marker.display().to_string(),
+                    ])
+                    .output();
+            }
             let (cmd, args) = mux.attach_command(&full_name);
             if let Ok(pane) = TerminalPane::new(
                 session.id.clone(),
@@ -331,7 +356,6 @@ impl App {
             bell_tx,
             bell_rx,
             last_bell_poll: Instant::now(),
-            bell_notified: HashSet::new(),
             width: term_w,
             height: term_h,
             should_quit: false,
@@ -508,7 +532,6 @@ impl App {
             SidebarAction::SelectSession(id) => {
                 self.sidebar.set_selected(&id);
                 self.sidebar.clear_attention(&id);
-                self.bell_notified.remove(&id);
                 self.active_session = Some(id.clone());
                 self.workspace.set_active_session(Some(&id));
                 self.focus = Focus::Terminal;
@@ -932,7 +955,10 @@ impl App {
         while let Ok(event) = self.bell_rx.try_recv() {
             match event {
                 PaneEvent::Bell(session_id) => {
-                    if self.active_session.as_deref() != Some(&session_id) {
+                    let is_active_and_watching = self.active_session.as_deref()
+                        == Some(&session_id)
+                        && self.focus == Focus::Terminal;
+                    if !is_active_and_watching {
                         bell_log(&format!(
                             "bell(pty): session={} (notifying)",
                             session_id
@@ -943,7 +969,6 @@ impl App {
                 }
                 PaneEvent::Death(session_id) => {
                     self.detach_pane(&session_id);
-                    self.bell_notified.remove(&session_id);
                     self.sidebar.clear_attention(&session_id);
                     self.workspace.remove_session(&session_id);
                     self.sidebar.refresh(&self.workspace);
@@ -951,11 +976,12 @@ impl App {
             }
         }
 
-        // Poll multiplexer for bell flags every 500ms (skip if no sessions)
+        // Poll for bell marker files deposited by tmux's alert-bell hook.
+        // Each entry returned is a fresh edge event (marker consumed by check_bell_flags).
         if !self.panes.is_empty() && self.last_bell_poll.elapsed() >= Duration::from_millis(500) {
             self.last_bell_poll = Instant::now();
             let flags = self.mux.check_bell_flags(&self.session_name_prefix);
-            for (full_name, has_bell) in flags {
+            for (full_name, _) in flags {
                 let session_id = match config::extract_session_id(
                     &full_name,
                     &self.session_prefix,
@@ -964,25 +990,16 @@ impl App {
                     Some(id) => id,
                     None => continue,
                 };
-                if has_bell {
-                    if !self.bell_notified.contains(&session_id) {
-                        self.bell_notified.insert(session_id.clone());
-                        if self.active_session.as_deref() != Some(session_id.as_str()) {
-                            bell_log(&format!(
-                                "bell: session={} (notifying, active={:?})",
-                                session_id, self.active_session
-                            ));
-                            self.sidebar.set_attention(&session_id);
-                            play_bell();
-                        } else {
-                            bell_log(&format!(
-                                "bell: session={} (skipped, is active)",
-                                session_id
-                            ));
-                        }
-                    }
-                } else {
-                    self.bell_notified.remove(&session_id);
+                let is_active_and_watching = self.active_session.as_deref()
+                    == Some(&session_id)
+                    && self.focus == Focus::Terminal;
+                if !is_active_and_watching {
+                    bell_log(&format!(
+                        "bell(hook): session={} (notifying)",
+                        session_id
+                    ));
+                    self.sidebar.set_attention(&session_id);
+                    play_bell();
                 }
             }
         }

@@ -1,4 +1,5 @@
 mod app;
+mod claude_hook;
 mod config;
 mod input_panel;
 mod keys;

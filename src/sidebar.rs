@@ -85,9 +85,7 @@ impl Sidebar {
     }
 
     pub fn set_attention(&mut self, id: &str) {
-        if self.selected.as_deref() != Some(id) {
-            self.attention.insert(id.to_string());
-        }
+        self.attention.insert(id.to_string());
     }
 
     pub fn clear_attention(&mut self, id: &str) {
@@ -320,7 +318,7 @@ impl Sidebar {
         }
     }
 
-    pub fn render(&self, area: Rect, buf: &mut Buffer, _workspace: &Workspace) {
+    pub fn render(&self, area: Rect, buf: &mut Buffer, workspace: &Workspace) {
         let dim = Style::default().add_modifier(Modifier::DIM);
         let bold = Style::default().add_modifier(Modifier::BOLD);
         let sep_style = if self.focused {
@@ -438,6 +436,13 @@ impl Sidebar {
 
                         let count = *session_count;
 
+                        // Does any session under this project have attention?
+                        // Surfaces the bell even when the project is collapsed.
+                        let project_has_attention = workspace
+                            .sessions_for_project(name)
+                            .iter()
+                            .any(|s| self.attention.contains(&s.id));
+
                         // Blank line (vline), name line (vline+1)
                         let name_vline = vline + 1;
                         if name_vline >= self.scroll_offset
@@ -445,8 +450,20 @@ impl Sidebar {
                         {
                             let sy =
                                 items_top_y + (name_vline - self.scroll_offset) as u16;
-                            let mut spans =
-                                vec![Span::raw(format!(" {} {}", arrow, name))];
+                            let mut spans: Vec<Span> = Vec::new();
+                            if project_has_attention {
+                                let bell_glyph = if self.nerd_font { "\u{f0f3}" } else { "*" };
+                                let attention_style = Style::default()
+                                    .fg(Color::Rgb(0xFF, 0x6C, 0x6B))
+                                    .add_modifier(Modifier::BOLD);
+                                spans.push(Span::styled(
+                                    format!(" {} ", bell_glyph),
+                                    attention_style,
+                                ));
+                                spans.push(Span::raw(format!("{} {}", arrow, name)));
+                            } else {
+                                spans.push(Span::raw(format!(" {} {}", arrow, name)));
+                            }
                             if count > 0 {
                                 spans.push(Span::styled(format!(" ({})", count), dim));
                             }

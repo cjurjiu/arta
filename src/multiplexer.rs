@@ -1,4 +1,19 @@
+use std::path::PathBuf;
 use std::process::Command;
+
+/// Directory where tmux's `alert-bell` hook deposits a marker file per session.
+/// arta polls this directory to pick up bell events (see `TmuxBackend::check_bell_flags`).
+pub fn bell_marker_dir() -> PathBuf {
+    let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    p.push(".local/share/arta/bells");
+    p
+}
+
+pub fn bell_marker_path(session: &str) -> PathBuf {
+    let mut p = bell_marker_dir();
+    p.push(session);
+    p
+}
 
 pub trait MultiplexerBackend {
     /// The tag character for session naming ("t" or "z").
@@ -48,10 +63,21 @@ impl MultiplexerBackend for TmuxBackend {
         // from the start (before the PTY attaches and resizes the session).
         let rows_str = rows.to_string();
         let cols_str = cols.to_string();
+        // ARTA_BELL_MARKER lets the claude-code Notification hook write to the
+        // correct per-session marker file. See claude_hook::ensure_notify_hook.
+        let marker_env = format!("ARTA_BELL_MARKER={}", bell_marker_path(name).display());
         let _ = Command::new("tmux")
             .args([
-                "new-session", "-d", "-s", name, "-x", &cols_str, "-y", &rows_str, "-c", dir,
+                "new-session", "-d", "-s", name,
+                "-x", &cols_str, "-y", &rows_str,
+                "-c", dir,
+                "-e", &marker_env,
             ])
+            .output();
+        // Also apply to the session env so any later-spawned processes see it.
+        let _ = Command::new("tmux")
+            .args(["set-environment", "-t", name, "ARTA_BELL_MARKER",
+                   &bell_marker_path(name).display().to_string()])
             .output();
         // Split top/bottom — the new (bottom) pane gets 25%.
         // Minimum 3 rows for the bottom pane; skip the split entirely if the
@@ -123,34 +149,35 @@ impl MultiplexerBackend for TmuxBackend {
         let _ = Command::new("tmux")
             .args(["set-option", "-t", name, "visual-bell", "off"])
             .output();
+
+        // alert-bell hook: marker file is edge-triggered and consumed by arta's poll.
+        // Reliable even when the belling window is current in an attached client —
+        // unlike window_bell_flag, which tmux clears before our 500ms poll samples it.
+        let _ = std::fs::create_dir_all(bell_marker_dir());
+        let marker = bell_marker_path(name);
+        let hook_cmd = format!("run-shell \"touch '{}'\"", marker.display());
+        let _ = Command::new("tmux")
+            .args(["set-hook", "-t", name, "alert-bell", &hook_cmd])
+            .output();
     }
 
     fn check_bell_flags(&self, name_prefix: &str) -> Vec<(String, bool)> {
-        let output = Command::new("tmux")
-            .args([
-                "list-windows",
-                "-a",
-                "-F",
-                "#{session_name} #{window_bell_flag}",
-            ])
-            .output();
-        match output {
-            Ok(o) if o.status.success() => {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                let mut seen = std::collections::HashMap::new();
-                for line in stdout.lines() {
-                    if let Some((sess_name, flag_str)) = line.split_once(' ') {
-                        if sess_name.starts_with(name_prefix) {
-                            let has_bell = flag_str == "1";
-                            let entry = seen.entry(sess_name.to_string()).or_insert(false);
-                            *entry = *entry || has_bell;
-                        }
-                    }
-                }
-                seen.into_iter().collect()
+        // Read marker files deposited by the `alert-bell` hook. Each entry is
+        // edge-triggered: we consume it by deleting the file, so the caller
+        // sees exactly one event per bell.
+        let entries = match std::fs::read_dir(bell_marker_dir()) {
+            Ok(e) => e,
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(name_prefix) {
+                let _ = std::fs::remove_file(entry.path());
+                out.push((name, true));
             }
-            _ => Vec::new(),
         }
+        out
     }
 
     fn attach_command(&self, session_name: &str) -> (String, Vec<String>) {
@@ -239,10 +266,17 @@ impl MultiplexerBackend for ZellijBackend {
             let _ = Command::new("zellij").args(&full_args).output();
         };
 
+        // Marker path for claude-code's Notification hook (see claude_hook module).
+        let marker = bell_marker_path(name);
+
         // Dismiss the "About Zellij" startup floating pane
         zj(&["action", "close-pane"]);
-        // cd + launch agent in the main pane
-        zj(&["action", "write-chars", &format!("cd {} && clear", dir)]);
+        // cd + export ARTA_BELL_MARKER + launch agent in the main pane
+        zj(&["action", "write-chars", &format!(
+            "cd {} && export ARTA_BELL_MARKER={} && clear",
+            dir,
+            marker.display()
+        )]);
         zj(&["action", "write", "10"]);
         zj(&["action", "write-chars", agent_command]);
         zj(&["action", "write", "10"]);
