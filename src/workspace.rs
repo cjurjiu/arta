@@ -11,20 +11,29 @@ pub struct Project {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Session {
+pub struct Thread {
     pub id: String,
     pub project: String,
     pub created: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub name_locked: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Workspace {
     pub projects: Vec<Project>,
-    pub sessions: Vec<Session>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_session: Option<String>,
-    #[serde(default)]
-    next_session_id: u64,
+    #[serde(alias = "sessions", default)]
+    pub threads: Vec<Thread>,
+    #[serde(
+        alias = "active_session",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub active_thread: Option<String>,
+    #[serde(alias = "next_session_id", default)]
+    next_thread_id: u64,
     #[serde(skip)]
     file_path: PathBuf,
 }
@@ -45,9 +54,9 @@ impl Workspace {
     pub fn new(file_path: PathBuf) -> Self {
         Workspace {
             projects: Vec::new(),
-            sessions: Vec::new(),
-            active_session: None,
-            next_session_id: 0,
+            threads: Vec::new(),
+            active_thread: None,
+            next_thread_id: 0,
             file_path,
         }
     }
@@ -60,9 +69,9 @@ impl Workspace {
         };
         let loaded: Workspace = serde_yaml::from_str(&data)?;
         self.projects = loaded.projects;
-        self.sessions = loaded.sessions;
-        self.active_session = loaded.active_session;
-        self.next_session_id = loaded.next_session_id;
+        self.threads = loaded.threads;
+        self.active_thread = loaded.active_thread;
+        self.next_thread_id = loaded.next_thread_id;
         Ok(())
     }
 
@@ -88,7 +97,7 @@ impl Workspace {
     }
 
     pub fn remove_project(&mut self, name: &str) {
-        self.sessions.retain(|s| s.project != name);
+        self.threads.retain(|t| t.project != name);
         self.projects.retain(|p| p.name != name);
         let _ = self.save();
     }
@@ -99,9 +108,9 @@ impl Workspace {
                 p.name = new_name.to_string();
             }
         }
-        for s in &mut self.sessions {
-            if s.project == old_name {
-                s.project = new_name.to_string();
+        for t in &mut self.threads {
+            if t.project == old_name {
+                t.project = new_name.to_string();
             }
         }
         let _ = self.save();
@@ -114,57 +123,100 @@ impl Workspace {
         }
     }
 
-    pub fn create_session(&mut self, project_name: &str) -> Option<&Session> {
-        self.next_session_id += 1;
-        let session = Session {
-            id: format!("{}-{}", project_name, self.next_session_id),
+    pub fn create_thread(&mut self, project_name: &str) -> Option<&Thread> {
+        self.next_thread_id += 1;
+        let thread = Thread {
+            id: format!("{}-{}", project_name, self.next_thread_id),
             project: project_name.to_string(),
             created: chrono_now(),
+            name: None,
+            name_locked: false,
         };
-        self.sessions.push(session);
+        self.threads.push(thread);
         let _ = self.save();
-        self.sessions.last()
+        self.threads.last()
     }
 
-    pub fn remove_session(&mut self, id: &str) {
-        self.sessions.retain(|s| s.id != id);
+    pub fn remove_thread(&mut self, id: &str) {
+        self.threads.retain(|t| t.id != id);
         let _ = self.save();
     }
 
-    pub fn rename_session(&mut self, old_id: &str, new_id: &str) -> bool {
-        if self.sessions.iter().any(|s| s.id == new_id && s.id != old_id) {
-            return false;
-        }
-        for s in &mut self.sessions {
-            if s.id == old_id {
-                s.id = new_id.to_string();
+    /// Set the user-visible display name for a thread.
+    /// `lock` should be true when the user manually renames; subsequent auto-rename
+    /// updates from the agent's OSC title will then be ignored.
+    pub fn set_thread_display_name(&mut self, id: &str, name: &str, lock: bool) {
+        let mut changed = false;
+        for t in &mut self.threads {
+            if t.id == id {
+                let new_name = if name.is_empty() {
+                    None
+                } else {
+                    Some(name.to_string())
+                };
+                if t.name != new_name || (lock && !t.name_locked) {
+                    t.name = new_name;
+                    if lock {
+                        t.name_locked = true;
+                    }
+                    changed = true;
+                }
                 break;
             }
         }
-        let _ = self.save();
-        true
+        if changed {
+            let _ = self.save();
+        }
     }
 
-    pub fn swap_session_in_project(&mut self, id: &str, direction: i32) {
-        let project = match self.sessions.iter().find(|s| s.id == id) {
-            Some(s) => s.project.clone(),
+    /// Returns the display name for a thread: the override `name` if set,
+    /// otherwise the stable `id`. Returns `id` itself if the thread is unknown.
+    pub fn display_name_for<'a>(&'a self, id: &'a str) -> &'a str {
+        for t in &self.threads {
+            if t.id == id {
+                return t.name.as_deref().unwrap_or(&t.id);
+            }
+        }
+        id
+    }
+
+    /// Returns the raw `name` override for a thread (without falling back to `id`).
+    /// `None` means no name has ever been set.
+    pub fn get_thread_name(&self, id: &str) -> Option<&str> {
+        self.threads
+            .iter()
+            .find(|t| t.id == id)
+            .and_then(|t| t.name.as_deref())
+    }
+
+    pub fn is_thread_name_locked(&self, id: &str) -> bool {
+        self.threads
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.name_locked)
+            .unwrap_or(false)
+    }
+
+    pub fn swap_thread_in_project(&mut self, id: &str, direction: i32) {
+        let project = match self.threads.iter().find(|t| t.id == id) {
+            Some(t) => t.project.clone(),
             None => return,
         };
 
         let indices: Vec<usize> = self
-            .sessions
+            .threads
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.project == project)
+            .filter(|(_, t)| t.project == project)
             .map(|(i, _)| i)
             .collect();
 
         for (pos, &idx) in indices.iter().enumerate() {
-            if self.sessions[idx].id == id {
+            if self.threads[idx].id == id {
                 let target_pos = pos as i32 + direction;
                 if target_pos >= 0 && (target_pos as usize) < indices.len() {
                     let target_idx = indices[target_pos as usize];
-                    self.sessions.swap(idx, target_idx);
+                    self.threads.swap(idx, target_idx);
                     let _ = self.save();
                 }
                 return;
@@ -172,8 +224,8 @@ impl Workspace {
         }
     }
 
-    pub fn sessions_for_project(&self, name: &str) -> Vec<&Session> {
-        self.sessions.iter().filter(|s| s.project == name).collect()
+    pub fn threads_for_project(&self, name: &str) -> Vec<&Thread> {
+        self.threads.iter().filter(|t| t.project == name).collect()
     }
 
     pub fn get_project_path(&self, name: &str) -> Option<&str> {
@@ -197,12 +249,12 @@ impl Workspace {
         }
     }
 
-    pub fn set_active_session(&mut self, id: Option<&str>) {
+    pub fn set_active_thread(&mut self, id: Option<&str>) {
         let new = id.map(|s| s.to_string());
-        if self.active_session == new {
+        if self.active_thread == new {
             return;
         }
-        self.active_session = new;
+        self.active_thread = new;
         let _ = self.save();
     }
 
@@ -346,41 +398,45 @@ mod tests {
     }
 
     #[test]
-    fn test_create_session() {
+    fn test_create_thread() {
         let mut ws = temp_workspace();
         ws.add_project("proj", "/tmp/proj", None);
-        ws.create_session("proj");
-        ws.create_session("proj");
-        assert_eq!(ws.sessions.len(), 2);
-        assert_eq!(ws.sessions[0].id, "proj-1");
-        assert_eq!(ws.sessions[1].id, "proj-2");
+        ws.create_thread("proj");
+        ws.create_thread("proj");
+        assert_eq!(ws.threads.len(), 2);
+        assert_eq!(ws.threads[0].id, "proj-1");
+        assert_eq!(ws.threads[1].id, "proj-2");
+        assert!(ws.threads[0].name.is_none());
+        assert!(!ws.threads[0].name_locked);
     }
 
     #[test]
     fn test_rename_project() {
         let mut ws = temp_workspace();
         ws.add_project("old", "/tmp/old", None);
-        ws.create_session("old");
+        ws.create_thread("old");
         ws.rename_project("old", "new");
         assert_eq!(ws.projects[0].name, "new");
-        assert_eq!(ws.sessions[0].project, "new");
+        assert_eq!(ws.threads[0].project, "new");
     }
 
     #[test]
     fn test_yaml_roundtrip() {
         let mut ws = temp_workspace();
         ws.add_project("proj", "/tmp/proj", None);
-        ws.create_session("proj");
+        ws.create_thread("proj");
+        ws.set_thread_display_name("proj-1", "My work", true);
         ws.save().unwrap();
 
         let mut ws2 = Workspace::new(ws.file_path.clone());
         ws2.load().unwrap();
         assert_eq!(ws2.projects.len(), 1);
-        assert_eq!(ws2.sessions.len(), 1);
+        assert_eq!(ws2.threads.len(), 1);
         assert_eq!(ws2.projects[0].name, "proj");
-        assert_eq!(ws2.sessions[0].id, "proj-1");
+        assert_eq!(ws2.threads[0].id, "proj-1");
+        assert_eq!(ws2.threads[0].name.as_deref(), Some("My work"));
+        assert!(ws2.threads[0].name_locked);
 
-        // Clean up
         let _ = fs::remove_dir_all(ws.file_path.parent().unwrap());
     }
 
@@ -395,11 +451,82 @@ mod tests {
     }
 
     #[test]
+    fn test_set_thread_display_name() {
+        let mut ws = temp_workspace();
+        ws.add_project("p", "/tmp/p", None);
+        ws.create_thread("p");
+
+        // Auto-set (no lock)
+        ws.set_thread_display_name("p-1", "Refactoring auth", false);
+        assert_eq!(ws.threads[0].name.as_deref(), Some("Refactoring auth"));
+        assert!(!ws.threads[0].name_locked);
+        assert_eq!(ws.display_name_for("p-1"), "Refactoring auth");
+
+        // Auto-update again (still not locked)
+        ws.set_thread_display_name("p-1", "Other work", false);
+        assert_eq!(ws.threads[0].name.as_deref(), Some("Other work"));
+        assert!(!ws.threads[0].name_locked);
+
+        // User rename (locks)
+        ws.set_thread_display_name("p-1", "User chosen", true);
+        assert!(ws.threads[0].name_locked);
+        assert_eq!(ws.display_name_for("p-1"), "User chosen");
+
+        // Lock stays sticky on subsequent calls
+        ws.set_thread_display_name("p-1", "Other again", false);
+        // The stored value still updates (caller is responsible for skipping if locked)
+        // — the lock is informational, enforced by the caller via is_thread_name_locked.
+        // But test that lock flag remains true.
+        assert!(ws.threads[0].name_locked);
+    }
+
+    #[test]
+    fn test_display_name_for_falls_back_to_id() {
+        let mut ws = temp_workspace();
+        ws.add_project("p", "/tmp/p", None);
+        ws.create_thread("p");
+        assert_eq!(ws.display_name_for("p-1"), "p-1");
+        assert_eq!(ws.display_name_for("nonexistent"), "nonexistent");
+    }
+
+    #[test]
+    fn test_is_thread_name_locked() {
+        let mut ws = temp_workspace();
+        ws.add_project("p", "/tmp/p", None);
+        ws.create_thread("p");
+        assert!(!ws.is_thread_name_locked("p-1"));
+        ws.set_thread_display_name("p-1", "x", true);
+        assert!(ws.is_thread_name_locked("p-1"));
+        assert!(!ws.is_thread_name_locked("nonexistent"));
+    }
+
+    #[test]
+    fn test_load_legacy_session_keys() {
+        // YAML using the pre-rename keys: sessions / active_session / next_session_id.
+        // The serde aliases should let this load without modification.
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("arta-legacy-{}-{}", std::process::id(), id));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("workspace.yaml");
+        let yaml = "projects:\n  - name: p\n    path: /tmp/p\nsessions:\n  - id: p-1\n    project: p\n    created: 2026-01-01T00:00:00Z\nactive_session: p-1\nnext_session_id: 1\n";
+        fs::write(&path, yaml).unwrap();
+
+        let mut ws = Workspace::new(path);
+        ws.load().unwrap();
+        assert_eq!(ws.projects.len(), 1);
+        assert_eq!(ws.threads.len(), 1);
+        assert_eq!(ws.threads[0].id, "p-1");
+        assert_eq!(ws.active_thread.as_deref(), Some("p-1"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn test_migrate_from_json() {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
         let base = std::env::temp_dir().join(format!("arta-migrate-{}-{}", std::process::id(), id));
 
-        // Create a legacy JSON file
+        // Create a legacy JSON file using the old session-keyed schema.
         let legacy_dir = base.join("legacy");
         let _ = fs::create_dir_all(&legacy_dir);
         let json = r#"{
@@ -416,7 +543,8 @@ mod tests {
         let new_path = new_dir.join("workspace.yaml");
 
         // Cannot use migrate_workspace_if_needed directly since it checks
-        // dirs::config_dir(). Test the JSON-to-YAML conversion logic instead.
+        // dirs::config_dir(). Test the JSON-to-YAML conversion logic instead,
+        // exercising the same serde aliases.
         let loaded: Workspace =
             serde_json::from_str(json).unwrap();
         let yaml = serde_yaml::to_string(&loaded).unwrap();
@@ -426,7 +554,7 @@ mod tests {
         ws.load().unwrap();
         assert_eq!(ws.projects.len(), 1);
         assert_eq!(ws.projects[0].name, "test");
-        assert_eq!(ws.sessions[0].id, "test-1");
+        assert_eq!(ws.threads[0].id, "test-1");
 
         let _ = fs::remove_dir_all(&base);
     }

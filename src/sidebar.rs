@@ -9,15 +9,15 @@ use std::process::Command;
 
 pub enum SidebarAction {
     None,
-    SelectSession(String),
-    NewSession(String),
-    CloseSession(String),
+    SelectThread(String),
+    NewThread(String),
+    CloseThread(String),
     AddProject,
     RemoveProject(String),
     RenameProject(String),
-    RenameSession(String),
+    RenameThread(String),
     MoveProject(i32),
-    MoveSession(String, i32),
+    MoveThread(String, i32),
     OpenIde(String),
     ConfigureProject(String),
     CopyGithubLink,
@@ -28,8 +28,8 @@ pub enum SidebarAction {
 
 #[derive(Clone, Debug)]
 enum SidebarItem {
-    Project { name: String, session_count: usize },
-    Session { id: String, project: String },
+    Project { name: String, thread_count: usize },
+    Thread { id: String, project: String },
 }
 
 pub struct Sidebar {
@@ -106,9 +106,9 @@ impl Sidebar {
         }
     }
 
-    pub fn set_cursor_to_session(&mut self, id: &str) {
+    pub fn set_cursor_to_thread(&mut self, id: &str) {
         for (i, item) in self.items.iter().enumerate() {
-            if matches!(item, SidebarItem::Session { id: sid, .. } if sid == id) {
+            if matches!(item, SidebarItem::Thread { id: tid, .. } if tid == id) {
                 self.cursor = i;
                 self.ensure_cursor_visible();
                 return;
@@ -119,7 +119,7 @@ impl Sidebar {
     fn item_line_height(item: &SidebarItem) -> usize {
         match item {
             SidebarItem::Project { .. } => 2,
-            SidebarItem::Session { .. } => 1,
+            SidebarItem::Thread { .. } => 1,
         }
     }
 
@@ -156,15 +156,15 @@ impl Sidebar {
     fn rebuild_items(&mut self, workspace: &Workspace) {
         self.items.clear();
         for p in &workspace.projects {
-            let sessions = workspace.sessions_for_project(&p.name);
+            let threads = workspace.threads_for_project(&p.name);
             self.items.push(SidebarItem::Project {
                 name: p.name.clone(),
-                session_count: sessions.len(),
+                thread_count: threads.len(),
             });
             if self.expanded.contains(&p.name) {
-                for s in sessions {
-                    self.items.push(SidebarItem::Session {
-                        id: s.id.clone(),
+                for t in threads {
+                    self.items.push(SidebarItem::Thread {
+                        id: t.id.clone(),
                         project: p.name.clone(),
                     });
                 }
@@ -183,14 +183,14 @@ impl Sidebar {
     pub fn get_cursor_project(&self) -> Option<&str> {
         self.current_item().map(|item| match item {
             SidebarItem::Project { name, .. } => name.as_str(),
-            SidebarItem::Session { project, .. } => project.as_str(),
+            SidebarItem::Thread { project, .. } => project.as_str(),
         })
     }
 
-    /// Ensure the project containing the given session is expanded.
-    pub fn ensure_expanded(&mut self, session_id: &str, workspace: &Workspace) {
-        if let Some(session) = workspace.sessions.iter().find(|s| s.id == session_id) {
-            self.expanded.insert(session.project.clone());
+    /// Ensure the project containing the given thread is expanded.
+    pub fn ensure_expanded(&mut self, thread_id: &str, workspace: &Workspace) {
+        if let Some(thread) = workspace.threads.iter().find(|t| t.id == thread_id) {
+            self.expanded.insert(thread.project.clone());
             self.rebuild_items(workspace);
         }
     }
@@ -218,11 +218,11 @@ impl Sidebar {
             }
             KeyCode::Char('J') => self.with_current_item(|item| match item {
                 SidebarItem::Project { .. } => SidebarAction::MoveProject(1),
-                SidebarItem::Session { id, .. } => SidebarAction::MoveSession(id.clone(), 1),
+                SidebarItem::Thread { id, .. } => SidebarAction::MoveThread(id.clone(), 1),
             }),
             KeyCode::Char('K') => self.with_current_item(|item| match item {
                 SidebarItem::Project { .. } => SidebarAction::MoveProject(-1),
-                SidebarItem::Session { id, .. } => SidebarAction::MoveSession(id.clone(), -1),
+                SidebarItem::Thread { id, .. } => SidebarAction::MoveThread(id.clone(), -1),
             }),
             KeyCode::Enter => self.handle_action(workspace),
             KeyCode::Char('l') => SidebarAction::FocusTerminal,
@@ -246,24 +246,24 @@ impl Sidebar {
         match key.code {
             KeyCode::Char('a') => SidebarAction::AddProject,
             KeyCode::Char('d') => self.with_current_item(|item| match item {
-                SidebarItem::Session { id, .. } => SidebarAction::CloseSession(id.clone()),
+                SidebarItem::Thread { id, .. } => SidebarAction::CloseThread(id.clone()),
                 SidebarItem::Project { name, .. } => SidebarAction::RemoveProject(name.clone()),
             }),
             KeyCode::Char('n') => self.with_current_item(|item| match item {
-                SidebarItem::Project { name, .. } => SidebarAction::NewSession(name.clone()),
-                SidebarItem::Session { project, .. } => SidebarAction::NewSession(project.clone()),
+                SidebarItem::Project { name, .. } => SidebarAction::NewThread(name.clone()),
+                SidebarItem::Thread { project, .. } => SidebarAction::NewThread(project.clone()),
             }),
             KeyCode::Char('r') => self.with_current_item(|item| match item {
                 SidebarItem::Project { name, .. } => SidebarAction::RenameProject(name.clone()),
-                SidebarItem::Session { id, .. } => SidebarAction::RenameSession(id.clone()),
+                SidebarItem::Thread { id, .. } => SidebarAction::RenameThread(id.clone()),
             }),
             KeyCode::Char('o') => self.with_current_item(|item| match item {
                 SidebarItem::Project { name, .. } => SidebarAction::OpenIde(name.clone()),
-                SidebarItem::Session { project, .. } => SidebarAction::OpenIde(project.clone()),
+                SidebarItem::Thread { project, .. } => SidebarAction::OpenIde(project.clone()),
             }),
             KeyCode::Char('c') => self.with_current_item(|item| match item {
                 SidebarItem::Project { name, .. } => SidebarAction::ConfigureProject(name.clone()),
-                SidebarItem::Session { project, .. } => {
+                SidebarItem::Thread { project, .. } => {
                     SidebarAction::ConfigureProject(project.clone())
                 }
             }),
@@ -305,7 +305,7 @@ impl Sidebar {
                 self.handle_toggle(workspace);
                 SidebarAction::None
             }
-            SidebarItem::Session { id, .. } => SidebarAction::SelectSession(id),
+            SidebarItem::Thread { id, .. } => SidebarAction::SelectThread(id),
         }
     }
 
@@ -421,7 +421,7 @@ impl Sidebar {
                 }
 
                 match item {
-                    SidebarItem::Project { name, session_count } => {
+                    SidebarItem::Project { name, thread_count } => {
                         let arrow = if self.expanded.contains(name) {
                             if self.nerd_font {
                                 "\u{f115}"
@@ -434,14 +434,14 @@ impl Sidebar {
                             "\u{25b6}"
                         };
 
-                        let count = *session_count;
+                        let count = *thread_count;
 
-                        // Does any session under this project have attention?
+                        // Does any thread under this project have attention?
                         // Surfaces the bell even when the project is collapsed.
                         let project_has_attention = workspace
-                            .sessions_for_project(name)
+                            .threads_for_project(name)
                             .iter()
-                            .any(|s| self.attention.contains(&s.id));
+                            .any(|t| self.attention.contains(&t.id));
 
                         // Blank line (vline), name line (vline+1)
                         let name_vline = vline + 1;
@@ -479,7 +479,7 @@ impl Sidebar {
                             );
                         }
                     }
-                    SidebarItem::Session { id, .. } => {
+                    SidebarItem::Thread { id, .. } => {
                         if vline >= self.scroll_offset
                             && vline < self.scroll_offset + visible_lines
                         {
@@ -525,7 +525,13 @@ impl Sidebar {
                                 style = style.add_modifier(Modifier::REVERSED);
                             }
 
-                            let text = format!("   {} {}", icon, id);
+                            // Display name = override if set, else id. Truncate
+                            // with an ellipsis to fit the sidebar; "   <icon> "
+                            // is 5 cells of fixed prefix.
+                            let display = workspace.display_name_for(id);
+                            let max_name = w.saturating_sub(6).max(1);
+                            let name_str = truncate_with_ellipsis(display, max_name);
+                            let text = format!("   {} {}", icon, name_str);
                             let padded = format!("{:<width$}", text, width = w);
                             buf.set_line(
                                 area.x,
@@ -636,6 +642,18 @@ impl Sidebar {
                 }
             }
         }
+    }
+}
+
+fn truncate_with_ellipsis(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        s.to_string()
+    } else if max == 0 {
+        String::new()
+    } else {
+        let head: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{}\u{2026}", head)
     }
 }
 

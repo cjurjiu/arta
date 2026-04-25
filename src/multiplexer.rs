@@ -46,6 +46,12 @@ pub trait MultiplexerBackend {
     /// Optional setup to run after the PTY connects to a new session.
     /// Called on a background thread. Default: no-op.
     fn post_attach_setup(&self, _name: &str, _dir: &str, _agent_command: &str, _rows: u16) {}
+
+    /// Query the current OSC title of the agent pane (the top pane where the
+    /// coding agent runs) in the given multiplexer session. Returns `None` if
+    /// unavailable — pane gone, multiplexer not responding, no title set yet.
+    /// Called from the App's poll loop to drive thread auto-renaming.
+    fn agent_pane_title(&self, session_name: &str) -> Option<String>;
 }
 
 // ---------- Tmux ----------
@@ -190,6 +196,34 @@ impl MultiplexerBackend for TmuxBackend {
             ],
         )
     }
+
+    fn agent_pane_title(&self, session_name: &str) -> Option<String> {
+        // The agent pane is the top pane (the bottom split is added after).
+        // `-f '#{pane_at_top}'` filters list-panes to top panes only — this is
+        // robust against `pane-base-index` differences across user configs.
+        let out = Command::new("tmux")
+            .args([
+                "list-panes",
+                "-t",
+                session_name,
+                "-f",
+                "#{pane_at_top}",
+                "-F",
+                "#{pane_title}",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let title = stdout.lines().next()?.trim().to_string();
+        if title.is_empty() {
+            None
+        } else {
+            Some(title)
+        }
+    }
 }
 
 // ---------- Zellij ----------
@@ -291,7 +325,76 @@ impl MultiplexerBackend for ZellijBackend {
         for _ in 0..steps {
             zj(&["action", "resize", "increase", "down"]);
         }
+        // Name the agent pane so we can identify it in `list-panes --json` later
+        // for OSC-title polling. We read the *title* (OSC) field, not the *name*
+        // — naming is just a stable identifier. Done last so focus is on the top pane.
+        zj(&["action", "rename-pane", "agent"]);
     }
+
+    fn agent_pane_title(&self, session_name: &str) -> Option<String> {
+        // `zellij action list-panes --json` returns an array of pane objects.
+        // Field shapes vary by zellij version, so we walk the JSON defensively:
+        // find the entry whose name is "agent" (set in post_attach_setup) and
+        // return its title field.
+        let out = Command::new("zellij")
+            .args(["-s", session_name, "action", "list-panes", "--json"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let value: serde_json::Value = serde_json::from_str(&stdout).ok()?;
+        find_agent_pane_title(&value)
+    }
+}
+
+/// Walk a parsed `zellij action list-panes --json` value and return the title
+/// of the pane named "agent". Field names are matched case-insensitively to
+/// tolerate zellij version differences in the JSON shape.
+fn find_agent_pane_title(value: &serde_json::Value) -> Option<String> {
+    fn name_field(obj: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
+        for k in ["name", "Name", "pane_name", "PaneName"] {
+            if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
+                return Some(v);
+            }
+        }
+        None
+    }
+    fn title_field(obj: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
+        for k in ["title", "Title", "pane_title", "PaneTitle", "TITLE"] {
+            if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    let mut stack: Vec<&serde_json::Value> = vec![value];
+    while let Some(v) = stack.pop() {
+        match v {
+            serde_json::Value::Object(obj) => {
+                if name_field(obj) == Some("agent") {
+                    if let Some(t) = title_field(obj) {
+                        let trimmed = t.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+                for (_, child) in obj {
+                    stack.push(child);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for child in arr {
+                    stack.push(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Instantiate the appropriate backend for the given multiplexer choice.

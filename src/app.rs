@@ -35,8 +35,8 @@ enum InputPurpose {
     ProjectName,
     ProjectOpenCommand,
     RenameProject,
-    RenameSession,
-    ConfirmCloseSession,
+    RenameThread,
+    ConfirmCloseThread,
     ConfirmRemoveProject,
     ConfigureProjectPath,
     ConfigureOpenCommand,
@@ -183,7 +183,7 @@ pub struct App {
     input_panel: InputPanel,
     workspace: Workspace,
     focus: Focus,
-    active_session: Option<String>,
+    active_thread: Option<String>,
     input_purpose: Option<InputPurpose>,
     input_context: Option<String>,
     pending_path: Option<String>,
@@ -195,6 +195,8 @@ pub struct App {
     bell_tx: mpsc::Sender<PaneEvent>,
     bell_rx: mpsc::Receiver<PaneEvent>,
     last_bell_poll: Instant,
+    /// Last OSC title observed per thread id, so we only react when it changes.
+    last_seen_title: HashMap<String, String>,
     width: u16,
     height: u16,
     should_quit: bool,
@@ -232,17 +234,17 @@ impl App {
         } else {
             Some((
                 format!(
-                    "{} session(s) from other multiplexer still running",
+                    "{} thread(s) from other multiplexer still running",
                     other_sessions.len()
                 ),
                 Instant::now(),
             ))
         };
 
-        // Prune dead sessions
+        // Prune dead threads (no live multiplexer session)
         let live = mux.list_sessions(&session_name_prefix);
-        workspace.sessions.retain(|s| {
-            let full = config::full_session_name(&s.id, &session_prefix, mux.tag());
+        workspace.threads.retain(|t| {
+            let full = config::full_session_name(&t.id, &session_prefix, mux.tag());
             live.contains(&full)
         });
         let _ = workspace.save();
@@ -268,11 +270,11 @@ impl App {
             }
         }
 
-        // Eagerly attach PTYs for all surviving sessions
+        // Eagerly attach PTYs for all surviving threads
         let mut panes = HashMap::new();
-        for session in &workspace.sessions {
+        for thread in &workspace.threads {
             let full_name =
-                config::full_session_name(&session.id, &session_prefix, mux.tag());
+                config::full_session_name(&thread.id, &session_prefix, mux.tag());
             // Re-apply bell settings on every attach
             mux.apply_bell_settings(&full_name);
             // (Re)export the marker into the tmux session environment so any
@@ -291,44 +293,43 @@ impl App {
             }
             let (cmd, args) = mux.attach_command(&full_name);
             if let Ok(pane) = TerminalPane::new(
-                session.id.clone(),
+                thread.id.clone(),
                 &cmd,
                 &args,
                 pane_height,
                 pane_width,
                 bell_tx.clone(),
             ) {
-                panes.insert(session.id.clone(), pane);
+                panes.insert(thread.id.clone(), pane);
             }
         }
 
-        // Restore last active session, or fall back to first alive session
-        let mut active_session = None;
-        if let Some(ref saved_id) = workspace.active_session {
+        // Restore last active thread, or fall back to first alive thread
+        let mut active_thread = None;
+        if let Some(ref saved_id) = workspace.active_thread {
             if panes.contains_key(saved_id) {
-                active_session = Some(saved_id.clone());
+                active_thread = Some(saved_id.clone());
             }
         }
-        if active_session.is_none() {
-            // Find first alive session by project order
+        if active_thread.is_none() {
             'outer: for project in &workspace.projects {
-                for session in workspace.sessions_for_project(&project.name) {
-                    if panes.contains_key(&session.id) {
-                        active_session = Some(session.id.clone());
+                for thread in workspace.threads_for_project(&project.name) {
+                    if panes.contains_key(&thread.id) {
+                        active_thread = Some(thread.id.clone());
                         break 'outer;
                     }
                 }
             }
         }
 
-        let (focus, sidebar_focused) = if active_session.is_some() {
+        let (focus, sidebar_focused) = if active_thread.is_some() {
             (Focus::Terminal, false)
         } else {
             (Focus::Sidebar, true)
         };
 
         let mut sidebar = sidebar;
-        if let Some(ref id) = active_session {
+        if let Some(ref id) = active_thread {
             sidebar.set_selected(id);
             sidebar.ensure_expanded(id, &workspace);
             sidebar.set_focused(sidebar_focused);
@@ -344,7 +345,7 @@ impl App {
             input_panel,
             workspace,
             focus,
-            active_session,
+            active_thread,
             input_purpose: None,
             input_context: None,
             pending_path: None,
@@ -356,6 +357,7 @@ impl App {
             bell_tx,
             bell_rx,
             last_bell_poll: Instant::now(),
+            last_seen_title: HashMap::new(),
             width: term_w,
             height: term_h,
             should_quit: false,
@@ -373,10 +375,10 @@ impl App {
             if full_name.starts_with(&new_prefix) {
                 continue;
             }
-            // Check if this is an old-format name for a known session
-            if let Some(session_id) = full_name.strip_prefix("arta_") {
-                if workspace.sessions.iter().any(|s| s.id == session_id) {
-                    let new_name = config::full_session_name(session_id, prefix, tag);
+            // Check if this is an old-format name for a known thread
+            if let Some(thread_id) = full_name.strip_prefix("arta_") {
+                if workspace.threads.iter().any(|t| t.id == thread_id) {
+                    let new_name = config::full_session_name(thread_id, prefix, tag);
                     tmux.rename_session(full_name, &new_name);
                 }
             }
@@ -410,7 +412,7 @@ impl App {
                         let action = self.sidebar.handle_mouse_click(mouse.row, &self.workspace);
                         self.process_sidebar_action(action);
                     }
-                } else if self.active_session.is_some() {
+                } else if self.active_thread.is_some() {
                     self.focus = Focus::Terminal;
                     self.sidebar.set_focused(false);
                     self.forward_mouse_to_pane(mouse);
@@ -418,8 +420,8 @@ impl App {
             }
             Event::Paste(text) => {
                 if self.focus == Focus::Terminal {
-                    if let Some(session_id) = &self.active_session {
-                        if let Some(pane) = self.panes.get_mut(session_id) {
+                    if let Some(thread_id) = &self.active_thread {
+                        if let Some(pane) = self.panes.get_mut(thread_id) {
                             // Send bracketed paste to the PTY so the application
                             // receives the entire paste as a single block
                             let mut buf = Vec::new();
@@ -486,7 +488,7 @@ impl App {
                     return;
                 }
                 KeyCode::Right => {
-                    if self.active_session.is_some() {
+                    if self.active_thread.is_some() {
                         self.focus = Focus::Terminal;
                         self.sidebar.set_focused(false);
                     }
@@ -514,9 +516,9 @@ impl App {
                 self.process_sidebar_action(action);
             }
             Focus::Terminal => {
-                if let Some(session_id) = &self.active_session {
+                if let Some(thread_id) = &self.active_thread {
                     if let Some(bytes) = keys::key_event_to_bytes(&key) {
-                        if let Some(pane) = self.panes.get_mut(session_id) {
+                        if let Some(pane) = self.panes.get_mut(thread_id) {
                             pane.write_input(&bytes);
                         }
                     }
@@ -529,21 +531,22 @@ impl App {
     fn process_sidebar_action(&mut self, action: SidebarAction) {
         match action {
             SidebarAction::None => {}
-            SidebarAction::SelectSession(id) => {
+            SidebarAction::SelectThread(id) => {
                 self.sidebar.set_selected(&id);
                 self.sidebar.clear_attention(&id);
-                self.active_session = Some(id.clone());
-                self.workspace.set_active_session(Some(&id));
+                self.active_thread = Some(id.clone());
+                self.workspace.set_active_thread(Some(&id));
                 self.focus = Focus::Terminal;
                 self.sidebar.set_focused(false);
             }
-            SidebarAction::NewSession(project) => {
-                self.create_session(&project);
+            SidebarAction::NewThread(project) => {
+                self.create_thread(&project);
             }
-            SidebarAction::CloseSession(id) => {
+            SidebarAction::CloseThread(id) => {
+                let display = self.workspace.display_name_for(&id).to_string();
                 self.open_input(
-                    InputPurpose::ConfirmCloseSession,
-                    &format!("Close session {}? (y/n)", id),
+                    InputPurpose::ConfirmCloseThread,
+                    &format!("Close thread {}? (y/n)", display),
                     "",
                     &id,
                 );
@@ -559,7 +562,7 @@ impl App {
             SidebarAction::RemoveProject(name) => {
                 self.open_input(
                     InputPurpose::ConfirmRemoveProject,
-                    &format!("Remove {} and all sessions? (y/n)", name),
+                    &format!("Remove {} and all threads? (y/n)", name),
                     "",
                     &name,
                 );
@@ -567,8 +570,9 @@ impl App {
             SidebarAction::RenameProject(old) => {
                 self.open_input(InputPurpose::RenameProject, "Rename project", &old, &old);
             }
-            SidebarAction::RenameSession(id) => {
-                self.open_input(InputPurpose::RenameSession, "Rename session", &id, &id);
+            SidebarAction::RenameThread(id) => {
+                let current = self.workspace.display_name_for(&id).to_string();
+                self.open_input(InputPurpose::RenameThread, "Rename thread", &current, &id);
             }
             SidebarAction::MoveProject(direction) => {
                 if let Some(project_name) = self.sidebar.get_cursor_project() {
@@ -588,10 +592,10 @@ impl App {
                     }
                 }
             }
-            SidebarAction::MoveSession(id, direction) => {
-                self.workspace.swap_session_in_project(&id, direction);
+            SidebarAction::MoveThread(id, direction) => {
+                self.workspace.swap_thread_in_project(&id, direction);
                 self.sidebar.refresh(&self.workspace);
-                self.sidebar.set_cursor_to_session(&id);
+                self.sidebar.set_cursor_to_thread(&id);
             }
             SidebarAction::OpenIde(project) => {
                 if let Some(cmd) = self.workspace.get_project_open_command(&project) {
@@ -637,7 +641,7 @@ impl App {
                 }
             }
             SidebarAction::FocusTerminal => {
-                if self.active_session.is_some() {
+                if self.active_thread.is_some() {
                     self.focus = Focus::Terminal;
                     self.sidebar.set_focused(false);
                 }
@@ -651,10 +655,10 @@ impl App {
             }
             SidebarAction::CleanExit => {
                 // Only kill sessions tracked in our workspace, not all arta_ sessions
-                let session_ids: Vec<String> =
-                    self.workspace.sessions.iter().map(|s| s.id.clone()).collect();
+                let thread_ids: Vec<String> =
+                    self.workspace.threads.iter().map(|t| t.id.clone()).collect();
                 self.panes.clear();
-                for id in &session_ids {
+                for id in &thread_ids {
                     let full = config::full_session_name(
                         id,
                         &self.session_prefix,
@@ -662,7 +666,7 @@ impl App {
                     );
                     self.mux.kill_session(&full);
                 }
-                self.workspace.sessions.clear();
+                self.workspace.threads.clear();
                 let _ = self.workspace.save();
                 self.should_quit = true;
             }
@@ -734,65 +738,44 @@ impl App {
                     }
                 }
             }
-            Some(InputPurpose::RenameSession) => {
-                let new_id = workspace::sanitize_name(&value);
-                if let Some(old_id) = context {
-                    if !new_id.is_empty() && new_id != old_id {
-                        if !self.workspace.rename_session(&old_id, &new_id) {
-                            self.timed_message = Some((
-                                format!("Session '{}' already exists", new_id),
-                                Instant::now(),
-                            ));
-                        } else {
-                            let old_full = config::full_session_name(
-                                &old_id,
-                                &self.session_prefix,
-                                self.mux.tag(),
-                            );
-                            let new_full = config::full_session_name(
-                                &new_id,
-                                &self.session_prefix,
-                                self.mux.tag(),
-                            );
-                            self.mux.rename_session(&old_full, &new_full);
-
-                            if let Some(pane) = self.panes.remove(&old_id) {
-                                self.panes.insert(new_id.clone(), pane);
-                            }
-
-                            if self.active_session.as_deref() == Some(&old_id) {
-                                self.active_session = Some(new_id.clone());
-                            }
-                            self.sidebar.set_selected(&new_id);
-                            self.sidebar.refresh(&self.workspace);
-                        }
+            Some(InputPurpose::RenameThread) => {
+                // The thread's stable id and multiplexer session are NOT touched —
+                // only the user-visible display name. Setting `lock=true` permanently
+                // disables auto-rename from the agent's OSC title for this thread.
+                if let Some(id) = context {
+                    let trimmed = value.trim();
+                    let current = self.workspace.display_name_for(&id).to_string();
+                    if !trimmed.is_empty() && trimmed != current {
+                        self.workspace
+                            .set_thread_display_name(&id, trimmed, true);
+                        self.sidebar.refresh(&self.workspace);
                     }
                 }
             }
-            Some(InputPurpose::ConfirmCloseSession) => {
+            Some(InputPurpose::ConfirmCloseThread) => {
                 if value == "y" || value == "Y" {
                     if let Some(id) = context {
-                        self.close_session(&id);
+                        self.close_thread(&id);
                     }
                 }
             }
             Some(InputPurpose::ConfirmRemoveProject) => {
                 if value == "y" || value == "Y" {
                     if let Some(name) = context {
-                        let session_ids: Vec<String> = self
+                        let thread_ids: Vec<String> = self
                             .workspace
-                            .sessions_for_project(&name)
+                            .threads_for_project(&name)
                             .iter()
-                            .map(|s| s.id.clone())
+                            .map(|t| t.id.clone())
                             .collect();
-                        for sid in &session_ids {
+                        for tid in &thread_ids {
                             let full = config::full_session_name(
-                                sid,
+                                tid,
                                 &self.session_prefix,
                                 self.mux.tag(),
                             );
                             self.mux.kill_session(&full);
-                            self.detach_pane(sid);
+                            self.detach_pane(tid);
                         }
                         self.workspace.remove_project(&name);
                         self.sidebar.refresh(&self.workspace);
@@ -856,14 +839,14 @@ impl App {
         }
     }
 
-    fn create_session(&mut self, project_name: &str) {
-        let session = match self.workspace.create_session(project_name) {
-            Some(s) => s.clone(),
+    fn create_thread(&mut self, project_name: &str) {
+        let thread = match self.workspace.create_thread(project_name) {
+            Some(t) => t.clone(),
             None => return,
         };
 
         let full_name = config::full_session_name(
-            &session.id,
+            &thread.id,
             &self.session_prefix,
             self.mux.tag(),
         );
@@ -896,7 +879,7 @@ impl App {
 
         let (cmd, args) = self.mux.attach_command(&full_name);
         if let Ok(pane) = TerminalPane::new(
-            session.id.clone(),
+            thread.id.clone(),
             &cmd,
             &args,
             pane_rows,
@@ -916,30 +899,31 @@ impl App {
                     mux.post_attach_setup(&setup_name, &setup_dir, &setup_agent, pane_rows);
                 });
             }
-            self.panes.insert(session.id.clone(), pane);
-            self.active_session = Some(session.id.clone());
-            self.workspace.set_active_session(Some(&session.id));
-            self.sidebar.set_selected(&session.id);
-            self.sidebar.ensure_expanded(&session.id, &self.workspace);
+            self.panes.insert(thread.id.clone(), pane);
+            self.active_thread = Some(thread.id.clone());
+            self.workspace.set_active_thread(Some(&thread.id));
+            self.sidebar.set_selected(&thread.id);
+            self.sidebar.ensure_expanded(&thread.id, &self.workspace);
             self.focus = Focus::Terminal;
             self.sidebar.set_focused(false);
         }
     }
 
-    fn close_session(&mut self, id: &str) {
+    fn close_thread(&mut self, id: &str) {
         let full = config::full_session_name(id, &self.session_prefix, self.mux.tag());
         self.mux.kill_session(&full);
         self.detach_pane(id);
-        self.workspace.remove_session(id);
+        self.workspace.remove_thread(id);
+        self.last_seen_title.remove(id);
         self.sidebar.refresh(&self.workspace);
     }
 
-    /// Remove a pane and clear active_session if it was the one removed.
+    /// Remove a pane and clear active_thread if it was the one removed.
     fn detach_pane(&mut self, id: &str) {
         self.panes.remove(id);
-        if self.active_session.as_deref() == Some(id) {
-            self.active_session = None;
-            self.workspace.set_active_session(None);
+        if self.active_thread.as_deref() == Some(id) {
+            self.active_thread = None;
+            self.workspace.set_active_thread(None);
         }
     }
 
@@ -954,35 +938,38 @@ impl App {
         // Process bell and death events from the PTY reader channel
         while let Ok(event) = self.bell_rx.try_recv() {
             match event {
-                PaneEvent::Bell(session_id) => {
-                    let is_active_and_watching = self.active_session.as_deref()
-                        == Some(&session_id)
+                PaneEvent::Bell(thread_id) => {
+                    let is_active_and_watching = self.active_thread.as_deref()
+                        == Some(&thread_id)
                         && self.focus == Focus::Terminal;
                     if !is_active_and_watching {
                         bell_log(&format!(
-                            "bell(pty): session={} (notifying)",
-                            session_id
+                            "bell(pty): thread={} (notifying)",
+                            thread_id
                         ));
-                        self.sidebar.set_attention(&session_id);
+                        self.sidebar.set_attention(&thread_id);
                         play_bell();
                     }
                 }
-                PaneEvent::Death(session_id) => {
-                    self.detach_pane(&session_id);
-                    self.sidebar.clear_attention(&session_id);
-                    self.workspace.remove_session(&session_id);
+                PaneEvent::Death(thread_id) => {
+                    self.detach_pane(&thread_id);
+                    self.sidebar.clear_attention(&thread_id);
+                    self.workspace.remove_thread(&thread_id);
+                    self.last_seen_title.remove(&thread_id);
                     self.sidebar.refresh(&self.workspace);
                 }
             }
         }
 
-        // Poll for bell marker files deposited by tmux's alert-bell hook.
-        // Each entry returned is a fresh edge event (marker consumed by check_bell_flags).
+        // 500ms tick: poll the multiplexer for bell markers AND for agent pane
+        // titles so we can auto-rename threads when the agent advertises a title.
         if !self.panes.is_empty() && self.last_bell_poll.elapsed() >= Duration::from_millis(500) {
             self.last_bell_poll = Instant::now();
+
+            // Bell markers (existing behaviour)
             let flags = self.mux.check_bell_flags(&self.session_name_prefix);
             for (full_name, _) in flags {
-                let session_id = match config::extract_session_id(
+                let thread_id = match config::extract_session_id(
                     &full_name,
                     &self.session_prefix,
                     self.mux.tag(),
@@ -990,18 +977,79 @@ impl App {
                     Some(id) => id,
                     None => continue,
                 };
-                let is_active_and_watching = self.active_session.as_deref()
-                    == Some(&session_id)
+                let is_active_and_watching = self.active_thread.as_deref()
+                    == Some(&thread_id)
                     && self.focus == Focus::Terminal;
                 if !is_active_and_watching {
                     bell_log(&format!(
-                        "bell(hook): session={} (notifying)",
-                        session_id
+                        "bell(hook): thread={} (notifying)",
+                        thread_id
                     ));
-                    self.sidebar.set_attention(&session_id);
+                    self.sidebar.set_attention(&thread_id);
                     play_bell();
                 }
             }
+
+            // Agent pane title polling
+            self.poll_agent_titles();
+        }
+    }
+
+    /// Walk all attached threads, query the agent pane's OSC title from the
+    /// multiplexer, and apply it as the thread's display name when it changes
+    /// — unless the user has manually renamed (locked) the thread.
+    fn poll_agent_titles(&mut self) {
+        let thread_ids: Vec<String> = self.panes.keys().cloned().collect();
+        for id in thread_ids {
+            let full = config::full_session_name(&id, &self.session_prefix, self.mux.tag());
+            let title = match self.mux.agent_pane_title(&full) {
+                Some(t) => t,
+                None => continue,
+            };
+            let cleaned = clean_agent_title(&title);
+            if cleaned.is_empty() {
+                continue;
+            }
+            // No-op fast-path: skip if the cleaned title hasn't changed.
+            // Without this, a cycling spinner glyph in the raw title would
+            // trigger a rename + YAML save every 500ms.
+            if self
+                .last_seen_title
+                .get(&id)
+                .map(|s| s.as_str() == cleaned.as_str())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            self.last_seen_title.insert(id.clone(), cleaned.clone());
+
+            // Skip if the user has locked the name.
+            if self.workspace.is_thread_name_locked(&id) {
+                continue;
+            }
+            // Skip if the title is just the thread id, or already the display name.
+            if cleaned == id {
+                continue;
+            }
+            if self.workspace.display_name_for(&id) == cleaned {
+                continue;
+            }
+            // Don't regress: a generic agent label ("Claude Code", "codex", …)
+            // is allowed as the *initial* auto-name (when nothing's been set yet,
+            // or when the current name is itself generic), but once a thread has
+            // a real, specific name we never swap it back to a generic one.
+            if is_generic_agent_title(&cleaned, &self.config.coding_agent_command) {
+                let current = self.workspace.get_thread_name(&id);
+                let current_is_generic = current
+                    .map(|c| is_generic_agent_title(c, &self.config.coding_agent_command))
+                    .unwrap_or(true);
+                if !current_is_generic {
+                    continue;
+                }
+            }
+            self.workspace
+                .set_thread_display_name(&id, &cleaned, false);
+            self.sidebar.refresh(&self.workspace);
         }
     }
 
@@ -1040,7 +1088,7 @@ impl App {
         let right_width = size.width.saturating_sub(right_x);
 
         let show_terminal = self
-            .active_session
+            .active_thread
             .as_ref()
             .and_then(|id| self.panes.get(id.as_str()))
             .is_some();
@@ -1068,7 +1116,7 @@ impl App {
             let term_content_height = main_height.saturating_sub(4);
             let term_area = Rect::new(right_x, term_content_y, right_width, term_content_height);
 
-            let id = self.active_session.as_ref().unwrap();
+            let id = self.active_thread.as_ref().unwrap();
             self.panes
                 .get(id.as_str())
                 .unwrap()
@@ -1191,11 +1239,11 @@ impl App {
     }
 
     fn forward_mouse_to_pane(&mut self, mouse: crossterm::event::MouseEvent) {
-        let session_id = match &self.active_session {
+        let thread_id = match &self.active_thread {
             Some(id) => id.clone(),
             None => return,
         };
-        let pane = match self.panes.get_mut(&session_id) {
+        let pane = match self.panes.get_mut(&thread_id) {
             Some(p) => p,
             None => return,
         };
@@ -1221,6 +1269,87 @@ impl App {
 
         let seq = format!("\x1b[<{};{};{}{}", button, col, row, suffix);
         pane.write_input(seq.as_bytes());
+    }
+}
+
+/// Strip leading non-alphanumeric characters from an agent's terminal title
+/// so the displayed thread name stays stable across spinner glyphs (braille
+/// `⠂` while thinking, `✳` while idle, `.` while loading, etc.). Trailing
+/// whitespace is also removed.
+fn clean_agent_title(s: &str) -> String {
+    s.trim_start_matches(|c: char| !c.is_alphanumeric())
+        .trim_end()
+        .to_string()
+}
+
+/// Generic agent labels that we don't want to overwrite an already-meaningful
+/// thread name with. Comparison is case-insensitive against this set plus the
+/// first word of the user's `coding_agent_command` config.
+fn is_generic_agent_title(title: &str, agent_command: &str) -> bool {
+    const STATIC: &[&str] = &[
+        "claude code",
+        "claude",
+        "codex",
+        "gemini",
+        "aider",
+        "cursor",
+    ];
+    let lower = title.trim().to_ascii_lowercase();
+    if STATIC.iter().any(|s| *s == lower) {
+        return true;
+    }
+    if let Some(first) = agent_command.split_whitespace().next() {
+        if first.to_ascii_lowercase() == lower {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::{clean_agent_title, is_generic_agent_title};
+
+    #[test]
+    fn strips_braille_spinner_prefix() {
+        assert_eq!(clean_agent_title("\u{2802} hello"), "hello");
+        assert_eq!(clean_agent_title("\u{2810} my-task"), "my-task");
+        assert_eq!(clean_agent_title("  \u{2800}  spaced  "), "spaced");
+    }
+
+    #[test]
+    fn strips_other_glyph_prefixes() {
+        // U+2733 ✳ (Claude idle), U+25CF ●, U+25C6 ◆, plus dots/punctuation
+        assert_eq!(clean_agent_title("\u{2733} Claude Code"), "Claude Code");
+        assert_eq!(clean_agent_title("\u{25CF} working"), "working");
+        assert_eq!(clean_agent_title("... loading"), "loading");
+        assert_eq!(clean_agent_title("  ."), "");
+    }
+
+    #[test]
+    fn passes_through_alphanumeric_start() {
+        assert_eq!(clean_agent_title("Refactoring auth"), "Refactoring auth");
+        // Note: leading punctuation is intentionally stripped.
+        assert_eq!(clean_agent_title("[WIP] foo"), "WIP] foo");
+    }
+
+    #[test]
+    fn empty_after_strip_is_empty() {
+        assert_eq!(clean_agent_title("\u{2800}\u{28FF}"), "");
+        assert_eq!(clean_agent_title("   "), "");
+    }
+
+    #[test]
+    fn detects_generic_titles() {
+        assert!(is_generic_agent_title("Claude Code", "claude"));
+        assert!(is_generic_agent_title("claude code", "claude"));
+        assert!(is_generic_agent_title("CLAUDE", "claude"));
+        assert!(is_generic_agent_title("codex", "claude"));
+        // Configured agent command's first word counts too
+        assert!(is_generic_agent_title("myagent", "myagent --foo"));
+        // Real titles are not generic
+        assert!(!is_generic_agent_title("Refactoring auth", "claude"));
+        assert!(!is_generic_agent_title("threads-auto-rename", "claude"));
     }
 }
 
