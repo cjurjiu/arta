@@ -20,7 +20,7 @@ Organize projects in a sidebar, manage multiple tmux or zellij-backed sessions, 
  │ ▼ fe-web1 (1)  │                                             │
  │   session-1 *  │  $ █                                        │
  │                │ focused ─────────────────────────────────── │
- │ ---------------│               interactive | v0.2.0 | MIT   │
+ │ ---------------│               interactive | v0.2.1 | MIT   │
  │ ctrl+space run │ [] 1 claude * - 2 zsh       2026-04-02 18:27│
  │ J/K reorder    │                                             │
  └────────────────┴─────────────────────────────────────────────┘
