@@ -1,7 +1,21 @@
 [package]
-name = "arta"
+name = "arta-tui"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Terminal workspace manager for concurrent AI coding agent sessions (tmux/zellij)"
+repository = "https://github.com/cjurjiu/arta"
+homepage = "https://github.com/cjurjiu/arta"
+readme = "README.md"
+authors = ["Catalin Jurjiu (https://github.com/cjurjiu)"]
+keywords = ["tui", "tmux", "zellij", "claude", "agent"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["target/", "docs/", ".github/", "CLAUDE.md"]
+
+[[bin]]
+name = "arta"
+path = "src/main.rs"
 
 [dependencies]
 ratatui = "0.29"

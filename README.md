@@ -44,12 +44,38 @@ Organize projects in a sidebar, manage multiple tmux or zellij-backed sessions, 
 
 ## Install
 
+You'll also need `tmux` (default) or `zellij` installed — see [Requirements](#requirements).
+
+### Homebrew (macOS, Linux)
+
+```bash
+brew install cjurjiu/arta/arta
+```
+
+### Shell installer (macOS, Linux)
+
+```bash
+curl -fsSL https://github.com/cjurjiu/arta/releases/latest/download/arta-installer.sh | sh
+```
+
+### Cargo
+
+```bash
+cargo install arta-tui          # compile from crates.io (binary is `arta`)
+cargo binstall arta-tui         # download prebuilt binary, no compile
+```
+
+### mise / ubi
+
+```bash
+mise use -g ubi:cjurjiu/arta@latest
+```
+
 ### From source
 
 ```bash
-brew install tmux     # if not already installed
 # Install Rust: https://rustup.rs/
-git clone https://github.com/catalinj/arta.git
+git clone https://github.com/cjurjiu/arta.git
 cd arta
 cargo build --release
 ```
