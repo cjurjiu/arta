@@ -1,0 +1,19 @@
+# Separate from .github/workflows/release.yml because cargo-dist regenerates
+# release.yml whenever `dist generate` runs. Both workflows trigger on the same
+# `v*` tag push; this one publishes the source crate to crates.io.
+name: Publish to crates.io
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'  # stable releases only; pre-release tags like v0.3.0-rc1 are skipped
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish

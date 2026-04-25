@@ -44,12 +44,12 @@ Organize projects in a sidebar, manage multiple tmux or zellij-backed sessions, 
 
 ## Install
 
-You'll also need `tmux` (default) or `zellij` installed — see [Requirements](#requirements).
+arta needs `tmux` (the default backend) or `zellij`. The Homebrew install pulls in `tmux` automatically; for other install methods, install one yourself — see [Requirements](#requirements).
 
 ### Homebrew (macOS, Linux)
 
 ```bash
-brew install cjurjiu/arta/arta
+brew install cjurjiu/arta/arta   # also installs tmux
 ```
 
 ### Shell installer (macOS, Linux)

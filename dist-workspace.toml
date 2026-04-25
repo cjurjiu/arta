@@ -1,0 +1,38 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "homebrew"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+]
+# Where to host releases
+hosting = "github"
+# Homebrew tap to push the formula to (separate repo, requires HOMEBREW_TAP_TOKEN secret)
+tap = "cjurjiu/homebrew-arta"
+# Formula name (so users can do `brew install cjurjiu/arta/arta`)
+formula = "arta"
+# What to do on PRs that touch dist config: just compute the plan, don't upload
+pr-run-mode = "plan"
+# Push the homebrew formula on release
+publish-jobs = ["homebrew"]
+# Where the shell installer puts the binary
+install-path = "CARGO_HOME"
+
+# Homebrew runtime dependency: arta needs tmux (default backend) or zellij.
+# We hard-depend on tmux because it's the configured default; zellij users can
+# still `brew install zellij` separately and switch via ~/.arta/config.yaml.
+[dist.dependencies.homebrew]
+tmux = "*"
