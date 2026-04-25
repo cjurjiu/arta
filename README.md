@@ -4,7 +4,7 @@
 
 Terminal workspace manager for concurrent AI coding agent usage. Enables parallel agent usage over a single SSH session.
 
-Organize projects in a sidebar, manage multiple tmux or zellij-backed sessions, and switch between them — all from a single binary. Close, reopen and continue from where you left off.
+Organize projects in a sidebar, run multiple threads (each backed by tmux or zellij), and switch between them — all from a single binary. Close, reopen and continue from where you left off.
 
 ```
  ┌────────────────┬─────────────────────────────────────────────┐
@@ -14,14 +14,14 @@ Organize projects in a sidebar, manage multiple tmux or zellij-backed sessions, 
  │                │  ╭─────────────────────────────────────╮    │
  │ -------------- │  │ claude> fix the login bug           │    │
  │ ▼ my-app (2)   │  │ ...                                 │    │
- │   session-1    │  ╰─────────────────────────────────────╯    │
- │   session-2 *  │  $ npm test                                 │
+ │   Fix login bug│  ╰─────────────────────────────────────╯    │
+ │   Add OAuth  * │  $ npm test                                 │
  │ ▶ api-svc      │  ✓ 42 tests passed                          │
  │ ▼ fe-web1 (1)  │                                             │
- │   session-1 *  │  $ █                                        │
+ │   my-app-1   * │  $ █                                        │
  │                │ focused ─────────────────────────────────── │
  │ ---------------│               interactive | v0.2.1 | MIT   │
- │ ctrl+space run │ [] 1 claude * - 2 zsh       2026-04-02 18:27│
+ │ ctrl+space run │ [] 1 claude * - 2 zsh       2026-04-25 13:46│
  │ J/K reorder    │                                             │
  └────────────────┴─────────────────────────────────────────────┘
       sidebar          tmux session (full PTY)
@@ -30,14 +30,15 @@ Organize projects in a sidebar, manage multiple tmux or zellij-backed sessions, 
 ## Features
 
 - **Project sidebar** — add, rename, reorder, and remove projects
-- **Tmux or Zellij sessions** — each session is backed by tmux (default) or zellij, with an agent window and a terminal window
+- **Tmux or Zellij threads** — each thread runs your coding agent + a shell, backed by a tmux (default) or zellij session for persistence
 - **Configurable coding agent** — defaults to `claude`, but can be set to `codex`, `gemini`, `opencode`, or any command
-- **Session persistence** — quit ARTA, sessions keep running. Reopen and reattach instantly
-- **Session restore** — remembers and reopens your last active session on startup
-- **Multiple profiles** — use `ARTA_CONFIG_ROOT` and `ARTA_SESSION_PREFIX` env vars to run independent ARTA instances with separate configs and sessions
+- **Auto-named threads** — threads pick up their name from the agent's terminal title (e.g., `Refactoring auth module`) instead of showing generic IDs. Manual rename (`Ctrl+Space r`) pins the name and disables further auto-updates
+- **Thread persistence** — quit ARTA, threads keep running. Reopen and reattach instantly
+- **Thread restore** — remembers and reopens your last active thread on startup
+- **Multiple profiles** — use `ARTA_CONFIG_ROOT` and `ARTA_SESSION_PREFIX` env vars to run independent ARTA instances with separate configs and threads
 - **Open IDE** — press `o` to launch your configured IDE (e.g., `webstorm .`, `idea .`) for any project
 - **Project configuration** — press `c` to configure project name, path, or open command via a navigable menu
-- **Bell notifications** — focus-aware bells via a Claude Code `Notification` hook (auto-installed into `~/.claude/settings.json`); shows a sidebar indicator and plays a sound for unfocused sessions, reliable across tmux and zellij
+- **Bell notifications** — focus-aware bells via a Claude Code `Notification` hook (auto-installed into `~/.claude/settings.json`); shows a sidebar indicator and plays a sound for unfocused threads, reliable across tmux and zellij
 - **Nerd Font detection** — auto-detects and uses icons when available, falls back to Unicode
 - **Full-width input panel** — tab-complete paths, browse directories, rename with full cursor support
 - **Single binary** — built with [Ratatui](https://ratatui.rs/) + [tui-term](https://github.com/a-kenji/tui-term) + [portable-pty](https://docs.rs/portable-pty)
@@ -104,15 +105,15 @@ arta
 | After `Ctrl+Space` | Action |
 |-----|--------|
 | `←` / `→` | Change focus (sidebar / terminal) |
-| `n` | New session |
+| `n` | New thread |
 | `o` | Open IDE (runs configured open command) |
-| `r` | Rename project or session |
+| `r` | Rename project or thread (pins thread name, disables auto-rename) |
 | `a` | Add project (path → name → open command) |
 | `c` | Configure project (rename, path, open command) |
-| `d` | Delete selected item (project or session) |
+| `d` | Delete selected item (project or thread) |
 | `g` | Copy GitHub link to clipboard |
-| `q` | Quit (sessions survive) |
-| `Q` | Clean exit (kill all sessions) |
+| `q` | Quit (threads survive in the background) |
+| `Q` | Clean exit (kill all threads) |
 
 The status bar shows `interactive` or `run` mode. When `Ctrl+Space` is pressed, it switches to `run` mode with "awaiting command..." until a key is pressed.
 
@@ -123,9 +124,9 @@ These keys work only when the sidebar is focused (no prefix needed):
 | Key | Action |
 |-----|--------|
 | `j` / `k` | Navigate up/down |
-| `J` / `K` | Reorder project or session |
+| `J` / `K` | Reorder project or thread |
 | `tab` | Expand/collapse project |
-| `enter` | Select session |
+| `enter` | Select thread |
 | `l` | Focus terminal |
 
 You can also click on either pane to switch focus.
@@ -134,7 +135,7 @@ Note: `Ctrl+Space` requires disabling macOS input source switching (see Requirem
 
 ### Inside the terminal
 
-Each session is a tmux (or zellij) session with two windows:
+Each thread is backed by a tmux (or zellij) session with two windows:
 
 - **agent** — launches your configured coding agent (`claude` by default) automatically
 - **terminal** — a plain shell
@@ -162,16 +163,16 @@ ARTA stores its configuration and workspace state under `~/.arta/` by default.
 All fields are optional — ARTA uses sensible defaults if the file is missing or incomplete.
 
 ```yaml
-# The command launched in the agent window of new sessions (default: "claude")
+# The command launched in the agent window of new threads (default: "claude")
 coding_agent_command: claude
 
 # Terminal multiplexer backend: "tmux" (default) or "zellij"
 multiplexer: tmux
 
-# Custom script to run instead of the default session creation.
+# Custom script to run instead of the default thread setup.
 # Receives two arguments: <session_name> <project_directory>
 # When set, coding_agent_command is ignored (the script controls what runs).
-# The multiplexer setting is still used for attaching to the session.
+# The multiplexer setting is still used for attaching to the underlying session.
 # multiplexer_init_script: /path/to/your/script.sh
 ```
 
@@ -184,7 +185,7 @@ multiplexer: tmux
 
 ### Multiple profiles
 
-Run independent ARTA instances with separate configs and sessions:
+Run independent ARTA instances with separate configs and threads:
 
 ```bash
 # Work profile
@@ -194,11 +195,11 @@ ARTA_CONFIG_ROOT=~/.arta-work ARTA_SESSION_PREFIX=work arta
 ARTA_CONFIG_ROOT=~/.arta-personal ARTA_SESSION_PREFIX=personal arta
 ```
 
-Each profile has its own `config.yaml`, `workspace.yaml`, and distinctly-named multiplexer sessions (`arta_work_t_*` vs `arta_personal_t_*`).
+Each profile has its own `config.yaml`, `workspace.yaml`, and distinctly-named multiplexer sessions backing its threads (`arta_work_t_*` vs `arta_personal_t_*`).
 
 ### Migration from older versions
 
-On first run, ARTA automatically migrates your workspace from the legacy location (`~/.config/arta/data/workspace.json`) to the new location (`~/.arta/workspace.yaml`). Existing tmux sessions are also renamed to the new naming scheme.
+On first run, ARTA automatically migrates your workspace from the legacy location (`~/.config/arta/data/workspace.json`) to the new location (`~/.arta/workspace.yaml`). Existing tmux sessions are also renamed to the new naming scheme. Workspace files using the older `sessions:` / `active_session:` / `next_session_id:` keys are loaded transparently and rewritten with the new `threads:` keys on first save.
 
 ## Architecture
 
@@ -207,32 +208,35 @@ ARTA (Rust binary)
 ├── Config (YAML, ~/.arta/config.yaml)
 │   └── Coding agent command, multiplexer choice, init script
 ├── Sidebar (ratatui widget)
-│   └── Project & session management
+│   └── Project & thread management
 ├── Input Panel (ratatui widget)
 │   └── Full-width bottom panel for path/rename input
-├── Terminal Panes (one per session, via portable-pty + tui-term)
+├── Terminal Panes (one per thread, via portable-pty + tui-term)
 │   ├── vt100::Parser processes PTY output on background thread
 │   └── tui-term::PseudoTerminal renders to ratatui buffer
 ├── Multiplexer (tmux or zellij, configurable)
-│   └── One session per ARTA session
+│   └── One session backs each thread
 │       ├── Window/tab "agent" → auto-launches coding agent
 │       └── Window/tab "terminal" → plain shell
 └── workspace.yaml (~/.arta/)
-    └── Projects, sessions, active session & per-project config
+    └── Projects, threads, active thread & per-project config
 ```
+
+Vocabulary: **thread** is the user-facing concept (what shows in the sidebar). Under the hood, each thread maps to a tmux/zellij **session** — the term is preserved everywhere ARTA talks to the multiplexer (CLI args, env vars, persistence keys for backward compat).
 
 ## How it works
 
-- The **sidebar** manages projects and sessions in `~/.arta/workspace.yaml`
-- Each **session** maps to a multiplexer session named `arta_{prefix?}_{t|z}_{project}-{n}` (e.g., `arta_t_myproj-1`)
-- Each session has its own **PTY** (via `portable-pty`) attached to its multiplexer session
-- A background **reader thread** per session feeds PTY output into a `vt100::Parser`
-- **Switching sessions** just changes which parser's screen is rendered — instant, no teardown
-- **Bell notifications** are driven by a Claude Code `Notification` hook (merged idempotently into `~/.claude/settings.json`) that touches a marker file under `~/.local/share/arta/bells/` for the current multiplexer session; ARTA polls that directory and raises attention for unfocused sessions. Raw PTY BEL is also handled as a fallback.
+- The **sidebar** manages projects and threads in `~/.arta/workspace.yaml`
+- Each **thread** maps to a multiplexer session named `arta_{prefix?}_{t|z}_{project}-{n}` (e.g., `arta_t_myproj-1`); the thread's display name is independent and updates from the agent's terminal title
+- Each thread has its own **PTY** (via `portable-pty`) attached to its multiplexer session
+- A background **reader thread** per pane feeds PTY output into a `vt100::Parser`
+- **Switching threads** just changes which parser's screen is rendered — instant, no teardown
+- **Auto-rename** — every 500ms, ARTA queries the agent pane's terminal title (`tmux display-message #{pane_title}` / `zellij action list-panes`); if it changed and the user hasn't pinned the name with `Ctrl+Space r`, the sidebar updates. Generic agent labels like `Claude Code` are accepted as the *initial* name but never overwrite a more specific one
+- **Bell notifications** are driven by a Claude Code `Notification` hook (merged idempotently into `~/.claude/settings.json`) that touches a marker file under `~/.local/share/arta/bells/` for the current multiplexer session; ARTA polls that directory and raises attention for unfocused threads. Raw PTY BEL is also handled as a fallback
 - **Key input** is written directly to the active PTY's master fd — no message queue, minimal latency
-- **Session restore** — the last active session is saved to `workspace.yaml` and auto-reopened on startup; falls back to the first alive session if the saved one is gone
+- **Thread restore** — the last active thread is saved to `workspace.yaml` and auto-reopened on startup; falls back to the first alive thread if the saved one is gone
 - When you **quit** (`q`), multiplexer sessions stay alive — reopen ARTA to reattach
-- When you **clean exit** (`Q`), all tracked sessions are killed
+- When you **clean exit** (`Q`), all tracked threads (and their backing sessions) are killed
 
 ## Known Issues
 
