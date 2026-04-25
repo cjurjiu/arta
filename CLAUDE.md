@@ -45,8 +45,14 @@ Config root: `~/.arta/` (override with `ARTA_CONFIG_ROOT` env var).
 ```yaml
 coding_agent_command: claude     # default command sent to new sessions
 multiplexer: tmux                # tmux | zellij
-multiplexer_init_script: ~       # custom script path (overrides coding_agent_command)
 ```
+
+Per-project agent overrides (`workspace.yaml`: `agent_command:` on a project) take
+precedence over the global `coding_agent_command`. Read at thread-create time only.
+
+The legacy `multiplexer_init_script` config key is no longer supported. If still
+present in `config.yaml` it is silently ignored, with a startup warning surfaced
+as a timed message.
 
 ### Environment Variables
 

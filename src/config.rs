@@ -26,9 +26,6 @@ pub struct Config {
 
     #[serde(default)]
     pub multiplexer: Multiplexer,
-
-    #[serde(default)]
-    pub multiplexer_init_script: Option<String>,
 }
 
 impl Default for Config {
@@ -36,7 +33,6 @@ impl Default for Config {
         Config {
             coding_agent_command: "claude".to_string(),
             multiplexer: Multiplexer::default(),
-            multiplexer_init_script: None,
         }
     }
 }
@@ -49,6 +45,22 @@ impl Config {
             Err(_) => Config::default(),
         }
     }
+}
+
+/// Returns true if the user's config.yaml still contains the deprecated
+/// `multiplexer_init_script` key. Used to surface a one-shot startup warning.
+pub fn config_has_deprecated_init_script() -> bool {
+    let path = config_path();
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&data) else {
+        return false;
+    };
+    value
+        .as_mapping()
+        .and_then(|m| m.get(serde_yaml::Value::String("multiplexer_init_script".into())))
+        .is_some()
 }
 
 /// Returns the ARTA config root directory.
@@ -117,7 +129,6 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.coding_agent_command, "claude");
         assert_eq!(config.multiplexer, Multiplexer::Tmux);
-        assert!(config.multiplexer_init_script.is_none());
     }
 
     #[test]
@@ -131,15 +142,10 @@ mod tests {
         let yaml = r#"
 coding_agent_command: "codex"
 multiplexer: zellij
-multiplexer_init_script: "/path/to/script.sh"
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.coding_agent_command, "codex");
         assert_eq!(config.multiplexer, Multiplexer::Zellij);
-        assert_eq!(
-            config.multiplexer_init_script.as_deref(),
-            Some("/path/to/script.sh")
-        );
     }
 
     #[test]
@@ -148,7 +154,19 @@ multiplexer_init_script: "/path/to/script.sh"
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.coding_agent_command, "claude");
         assert_eq!(config.multiplexer, Multiplexer::Zellij);
-        assert!(config.multiplexer_init_script.is_none());
+    }
+
+    #[test]
+    fn test_deprecated_init_script_is_ignored() {
+        // Old config files with multiplexer_init_script should still parse
+        // (the unknown field is silently dropped by serde) — they just don't
+        // get the field.
+        let yaml = r#"
+coding_agent_command: "codex"
+multiplexer_init_script: "/path/to/script.sh"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.coding_agent_command, "codex");
     }
 
     #[test]

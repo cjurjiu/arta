@@ -40,6 +40,7 @@ enum InputPurpose {
     ConfirmRemoveProject,
     ConfigureProjectPath,
     ConfigureOpenCommand,
+    ConfigureAgentCommand,
 }
 
 const CONFIG_MENU_MAX_VISIBLE: usize = 5;
@@ -48,6 +49,7 @@ const CONFIG_MENU_MAX_VISIBLE: usize = 5;
 enum ConfigOption {
     Rename,
     ProjectPath,
+    AgentCommand,
     OpenCommand,
 }
 
@@ -65,6 +67,7 @@ impl ConfigMenu {
             items: vec![
                 (ConfigOption::Rename, "Rename"),
                 (ConfigOption::ProjectPath, "Project path"),
+                (ConfigOption::AgentCommand, "Agent command"),
                 (ConfigOption::OpenCommand, "Open command"),
             ],
             cursor: 0,
@@ -229,7 +232,13 @@ impl App {
             multiplexer::backend_for(config::Multiplexer::Tmux)
         };
         let other_sessions = other_mux.list_sessions(&other_prefix);
-        let timed_message = if other_sessions.is_empty() {
+        let timed_message = if config::config_has_deprecated_init_script() {
+            Some((
+                "`multiplexer_init_script` in config.yaml is no longer supported and is ignored. ARTA now always uses its default layout."
+                    .to_string(),
+                Instant::now(),
+            ))
+        } else if other_sessions.is_empty() {
             None
         } else {
             Some((
@@ -263,8 +272,23 @@ impl App {
         // arta launch. Idempotent — safe to re-run. The hook writes to the per-session
         // ARTA_BELL_MARKER env var (set by the multiplexer at session create time);
         // if that env var isn't set (e.g. claude invoked outside arta), the hook is
-        // a no-op.
-        if cfg.coding_agent_command.split_whitespace().next().unwrap_or("").contains("claude") {
+        // a no-op. Install if the global agent or any per-project override mentions
+        // claude — over-installing is harmless because the hook short-circuits when
+        // the marker env var is absent.
+        let global_uses_claude = cfg
+            .coding_agent_command
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .contains("claude");
+        let any_project_uses_claude = workspace.projects.iter().any(|p| {
+            p.agent_command
+                .as_deref()
+                .and_then(|c| c.split_whitespace().next())
+                .map(|first| first.contains("claude"))
+                .unwrap_or(false)
+        });
+        if global_uses_claude || any_project_uses_claude {
             if let Err(e) = claude_hook::ensure_user_notify_hook() {
                 bell_log(&format!("claude_hook: ensure_user_notify_hook failed: {}", e));
             }
@@ -795,6 +819,11 @@ impl App {
                     self.workspace.set_project_open_command(&project, &value);
                 }
             }
+            Some(InputPurpose::ConfigureAgentCommand) => {
+                if let Some(project) = context {
+                    self.workspace.set_project_agent_command(&project, &value);
+                }
+            }
             None => {}
         }
 
@@ -820,6 +849,23 @@ impl App {
                     InputPurpose::ConfigureProjectPath,
                     &title,
                     &current_path,
+                );
+            }
+            ConfigOption::AgentCommand => {
+                let current_cmd = self
+                    .workspace
+                    .get_project_agent_command(project)
+                    .unwrap_or("")
+                    .to_string();
+                let title = format!(
+                    "Agent command \u{2014} {} (e.g. \"claude\", \"codex\", \"gemini\"). Empty = inherit global.",
+                    project
+                );
+                self.open_input(
+                    InputPurpose::ConfigureAgentCommand,
+                    &title,
+                    &current_cmd,
+                    project,
                 );
             }
             ConfigOption::OpenCommand => {
@@ -862,20 +908,15 @@ impl App {
         };
 
         let (pane_cols, pane_rows) = self.pane_size();
+        let agent = effective_agent_command(&self.workspace, &self.config, project_name).to_string();
 
-        if let Some(ref script) = self.config.multiplexer_init_script {
-            let _ = std::process::Command::new(script)
-                .args([&full_name, &dir])
-                .output();
-        } else {
-            self.mux.create_session(
-                &full_name,
-                &dir,
-                &self.config.coding_agent_command,
-                pane_rows,
-                pane_cols,
-            );
-        }
+        self.mux.create_session(
+            &full_name,
+            &dir,
+            &agent,
+            pane_rows,
+            pane_cols,
+        );
 
         let (cmd, args) = self.mux.attach_command(&full_name);
         if let Ok(pane) = TerminalPane::new(
@@ -886,19 +927,17 @@ impl App {
             pane_cols,
             self.bell_tx.clone(),
         ) {
-            // Run any post-attach setup on a background thread (e.g. zellij
-            // needs to dismiss popups, split panes, and send the agent command
-            // after the PTY connects).
-            if self.config.multiplexer_init_script.is_none() {
-                let mux = multiplexer::backend_for(self.config.multiplexer);
-                let setup_name = full_name.clone();
-                let setup_dir = dir.clone();
-                let setup_agent = self.config.coding_agent_command.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(300));
-                    mux.post_attach_setup(&setup_name, &setup_dir, &setup_agent, pane_rows);
-                });
-            }
+            // Run post-attach setup on a background thread (e.g. zellij needs
+            // to dismiss popups, split panes, and send the agent command after
+            // the PTY connects).
+            let mux = multiplexer::backend_for(self.config.multiplexer);
+            let setup_name = full_name.clone();
+            let setup_dir = dir.clone();
+            let setup_agent = agent.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                mux.post_attach_setup(&setup_name, &setup_dir, &setup_agent, pane_rows);
+            });
             self.panes.insert(thread.id.clone(), pane);
             self.active_thread = Some(thread.id.clone());
             self.workspace.set_active_thread(Some(&thread.id));
@@ -1038,10 +1077,21 @@ impl App {
             // is allowed as the *initial* auto-name (when nothing's been set yet,
             // or when the current name is itself generic), but once a thread has
             // a real, specific name we never swap it back to a generic one.
-            if is_generic_agent_title(&cleaned, &self.config.coding_agent_command) {
+            // Use the per-project effective agent so a `codex` project doesn't
+            // get a "Claude Code" title frozen as its name (and vice versa).
+            let project = self
+                .workspace
+                .threads
+                .iter()
+                .find(|t| t.id == id)
+                .map(|t| t.project.clone())
+                .unwrap_or_default();
+            let project_agent =
+                effective_agent_command(&self.workspace, &self.config, &project).to_string();
+            if is_generic_agent_title(&cleaned, &project_agent) {
                 let current = self.workspace.get_thread_name(&id);
                 let current_is_generic = current
-                    .map(|c| is_generic_agent_title(c, &self.config.coding_agent_command))
+                    .map(|c| is_generic_agent_title(c, &project_agent))
                     .unwrap_or(true);
                 if !current_is_generic {
                     continue;
@@ -1270,6 +1320,18 @@ impl App {
         let seq = format!("\x1b[<{};{};{}{}", button, col, row, suffix);
         pane.write_input(seq.as_bytes());
     }
+}
+
+/// Returns the agent command that should be used for a given project: the
+/// per-project override if set, otherwise the global default from config.
+fn effective_agent_command<'a>(
+    workspace: &'a Workspace,
+    config: &'a Config,
+    project: &str,
+) -> &'a str {
+    workspace
+        .get_project_agent_command(project)
+        .unwrap_or(&config.coding_agent_command)
 }
 
 /// Strip leading non-alphanumeric characters from an agent's terminal title

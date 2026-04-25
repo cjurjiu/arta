@@ -8,6 +8,8 @@ pub struct Project {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_command: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -92,6 +94,7 @@ impl Workspace {
             name: name.to_string(),
             path: path.to_string(),
             open_command: open_command.map(|s| s.to_string()),
+            agent_command: None,
         });
         let _ = self.save();
     }
@@ -268,6 +271,24 @@ impl Workspace {
             let _ = self.save();
         }
     }
+
+    pub fn get_project_agent_command(&self, name: &str) -> Option<&str> {
+        self.projects
+            .iter()
+            .find(|p| p.name == name)
+            .and_then(|p| p.agent_command.as_deref())
+    }
+
+    pub fn set_project_agent_command(&mut self, name: &str, cmd: &str) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.name == name) {
+            p.agent_command = if cmd.is_empty() {
+                None
+            } else {
+                Some(cmd.to_string())
+            };
+            let _ = self.save();
+        }
+    }
 }
 
 /// Migrate workspace from the legacy JSON location to the new YAML path.
@@ -436,6 +457,36 @@ mod tests {
         assert_eq!(ws2.threads[0].id, "proj-1");
         assert_eq!(ws2.threads[0].name.as_deref(), Some("My work"));
         assert!(ws2.threads[0].name_locked);
+
+        let _ = fs::remove_dir_all(ws.file_path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_project_agent_command() {
+        let mut ws = temp_workspace();
+        ws.add_project("p", "/tmp/p", None);
+
+        // Defaults to None
+        assert!(ws.get_project_agent_command("p").is_none());
+
+        // Set
+        ws.set_project_agent_command("p", "aider");
+        assert_eq!(ws.get_project_agent_command("p"), Some("aider"));
+
+        // Clear via empty string
+        ws.set_project_agent_command("p", "");
+        assert!(ws.get_project_agent_command("p").is_none());
+
+        // Unknown project: getter returns None, setter is a no-op (no panic)
+        assert!(ws.get_project_agent_command("nope").is_none());
+        ws.set_project_agent_command("nope", "codex");
+
+        // YAML roundtrip preserves the override
+        ws.set_project_agent_command("p", "codex");
+        ws.save().unwrap();
+        let mut ws2 = Workspace::new(ws.file_path.clone());
+        ws2.load().unwrap();
+        assert_eq!(ws2.get_project_agent_command("p"), Some("codex"));
 
         let _ = fs::remove_dir_all(ws.file_path.parent().unwrap());
     }

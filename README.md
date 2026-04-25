@@ -31,7 +31,7 @@ Organize projects in a sidebar, run multiple threads (each backed by tmux or zel
 
 - **Project sidebar** — add, rename, reorder, and remove projects
 - **Tmux or Zellij threads** — each thread runs your coding agent + a shell, backed by a tmux (default) or zellij session for persistence
-- **Configurable coding agent** — defaults to `claude`, but can be set to `codex`, `gemini`, `opencode`, or any command
+- **Configurable coding agent** — defaults to `claude`, but can be set globally to `codex`, `gemini`, `opencode`, or any command, with per-project overrides (use a different agent — or a different invocation of the same agent — on a per-project basis)
 - **Auto-named threads** — threads pick up their name from the agent's terminal title (e.g., `Refactoring auth module`) instead of showing generic IDs. Manual rename (`Ctrl+Space r`) pins the name and disables further auto-updates
 - **Thread persistence** — quit ARTA, threads keep running. Reopen and reattach instantly
 - **Thread restore** — remembers and reopens your last active thread on startup
@@ -109,7 +109,7 @@ arta
 | `o` | Open IDE (runs configured open command) |
 | `r` | Rename project or thread (pins thread name, disables auto-rename) |
 | `a` | Add project (path → name → open command) |
-| `c` | Configure project (rename, path, open command) |
+| `c` | Configure project (rename, path, agent command, open command) |
 | `d` | Delete selected item (project or thread) |
 | `g` | Copy GitHub link to clipboard |
 | `q` | Quit (threads survive in the background) |
@@ -163,18 +163,26 @@ ARTA stores its configuration and workspace state under `~/.arta/` by default.
 All fields are optional — ARTA uses sensible defaults if the file is missing or incomplete.
 
 ```yaml
-# The command launched in the agent window of new threads (default: "claude")
+# The command launched in the agent window of new threads (default: "claude").
+# This is the global default; individual projects can override it via
+# Ctrl+Space c → Agent command.
 coding_agent_command: claude
 
 # Terminal multiplexer backend: "tmux" (default) or "zellij"
 multiplexer: tmux
-
-# Custom script to run instead of the default thread setup.
-# Receives two arguments: <session_name> <project_directory>
-# When set, coding_agent_command is ignored (the script controls what runs).
-# The multiplexer setting is still used for attaching to the underlying session.
-# multiplexer_init_script: /path/to/your/script.sh
 ```
+
+### Per-project agent command
+
+Each project can override the global `coding_agent_command`. From the sidebar,
+select a project and press `Ctrl+Space c` → **Agent command**. Examples:
+
+- `claude` — plain Claude Code
+- `codex` — OpenAI Codex CLI
+- `gemini`, `opencode`, `aider`, … — anything you can run from a shell
+
+Submit an empty value to clear the override and fall back to the global. The
+override is read at thread-create time; existing threads are not affected.
 
 ### Environment variables
 
@@ -206,7 +214,7 @@ On first run, ARTA automatically migrates your workspace from the legacy locatio
 ```
 ARTA (Rust binary)
 ├── Config (YAML, ~/.arta/config.yaml)
-│   └── Coding agent command, multiplexer choice, init script
+│   └── Coding agent (global default + per-project overrides), multiplexer choice
 ├── Sidebar (ratatui widget)
 │   └── Project & thread management
 ├── Input Panel (ratatui widget)
@@ -231,7 +239,8 @@ Vocabulary: **thread** is the user-facing concept (what shows in the sidebar). U
 - Each thread has its own **PTY** (via `portable-pty`) attached to its multiplexer session
 - A background **reader thread** per pane feeds PTY output into a `vt100::Parser`
 - **Switching threads** just changes which parser's screen is rendered — instant, no teardown
-- **Auto-rename** — every 500ms, ARTA queries the agent pane's terminal title (`tmux display-message #{pane_title}` / `zellij action list-panes`); if it changed and the user hasn't pinned the name with `Ctrl+Space r`, the sidebar updates. Generic agent labels like `Claude Code` are accepted as the *initial* name but never overwrite a more specific one
+- **Auto-rename** — every 500ms, ARTA queries the agent pane's terminal title (`tmux display-message #{pane_title}` / `zellij action list-panes`); if it changed and the user hasn't pinned the name with `Ctrl+Space r`, the sidebar updates. Generic agent labels like `Claude Code` are accepted as the *initial* name but never overwrite a more specific one (the "generic" check uses the thread's effective agent — global default or per-project override)
+- **Per-project agent command** — each project can override `coding_agent_command` via `Ctrl+Space c` → Agent command. Stored on the project in `workspace.yaml`. Resolved at thread-create time only — existing threads keep their original agent
 - **Bell notifications** are driven by a Claude Code `Notification` hook (merged idempotently into `~/.claude/settings.json`) that touches a marker file under `~/.local/share/arta/bells/` for the current multiplexer session; ARTA polls that directory and raises attention for unfocused threads. Raw PTY BEL is also handled as a fallback
 - **Key input** is written directly to the active PTY's master fd — no message queue, minimal latency
 - **Thread restore** — the last active thread is saved to `workspace.yaml` and auto-reopened on startup; falls back to the first alive thread if the saved one is gone
