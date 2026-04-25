@@ -55,7 +55,7 @@ brew install cjurjiu/arta/arta   # also installs tmux
 ### Shell installer (macOS, Linux)
 
 ```bash
-curl -fsSL https://github.com/cjurjiu/arta/releases/latest/download/arta-installer.sh | sh
+curl -fsSL https://github.com/cjurjiu/arta/releases/latest/download/arta-tui-installer.sh | sh
 ```
 
 ### Cargo
