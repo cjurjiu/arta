@@ -43,12 +43,23 @@ Config root: `~/.arta/` (override with `ARTA_CONFIG_ROOT` env var).
 ### config.yaml
 
 ```yaml
-coding_agent_command: claude     # default command sent to new sessions
+coding_agent_command: claude     # default command sent to new threads (args allowed, e.g. "claude --resume")
+default_open_command: vi         # fallback for "open ide" when a project has no override; "" disables fallback
 multiplexer: tmux                # tmux | zellij
 ```
 
+All fields are editable in-app via `Ctrl+Space s` (ARTA settings); the menu
+calls `Config::save()` which writes the full file (no comment preservation).
+
 Per-project agent overrides (`workspace.yaml`: `agent_command:` on a project) take
-precedence over the global `coding_agent_command`. Read at thread-create time only.
+precedence over the global `coding_agent_command`. Per-project `open_command`
+overrides take precedence over `default_open_command`. Both are read at
+thread-create / open-IDE time respectively (not cached on App). Helpers:
+`effective_agent_command()` and `effective_open_command()` in `app.rs`.
+
+Multiplexer changes require a restart — the backend is built once at startup
+and stored on `App.mux`. `Multiplexer::is_installed()` walks `PATH` directly
+(no `--version` subprocess; tmux's `--version` flag spelling differs).
 
 The legacy `multiplexer_init_script` config key is no longer supported. If still
 present in `config.yaml` it is silently ignored, with a startup warning surfaced

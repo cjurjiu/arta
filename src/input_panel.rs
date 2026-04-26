@@ -17,9 +17,17 @@ pub enum InputAction {
     Cancel,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum DirEntryKind {
+    /// The pinned "Select folder" row that submits the current path verbatim.
+    Sentinel,
+    Dir,
+    File,
+}
+
 struct DirEntry {
     name: String,
-    is_dir: bool,
+    kind: DirEntryKind,
 }
 
 pub struct InputPanel {
@@ -70,6 +78,12 @@ impl InputPanel {
         self.dir_scroll = 0;
         if mode == InputMode::Path {
             self.update_dir_listing();
+            // The sentinel "Select folder" row sits at index 0; when there's any
+            // real entry, start the cursor on it instead so reflexive Enter
+            // doesn't submit the initial path before the user has navigated.
+            if self.dir_entries.len() > 1 {
+                self.dir_cursor = 1;
+            }
         }
     }
 
@@ -102,23 +116,36 @@ impl InputPanel {
             KeyCode::Enter => {
                 if self.mode == InputMode::Path && !self.dir_entries.is_empty() {
                     let entry = &self.dir_entries[self.dir_cursor];
-                    if entry.is_dir {
-                        let current = self.expand_path(&self.value);
-                        let dir = if current.ends_with('/') {
-                            current
-                        } else {
-                            match current.rfind('/') {
-                                Some(i) => current[..=i].to_string(),
-                                None => current,
+                    match entry.kind {
+                        DirEntryKind::Sentinel => {
+                            let val = self.expand_path(&self.value);
+                            self.deactivate();
+                            return InputAction::Submit(val);
+                        }
+                        DirEntryKind::Dir => {
+                            let current = self.expand_path(&self.value);
+                            let dir = if current.ends_with('/') {
+                                current
+                            } else {
+                                match current.rfind('/') {
+                                    Some(i) => current[..=i].to_string(),
+                                    None => current,
+                                }
+                            };
+                            let new_path = format!("{}{}/", dir, entry.name);
+                            self.value = new_path;
+                            self.cursor_pos = self.value.len();
+                            self.dir_cursor = 0;
+                            self.dir_scroll = 0;
+                            self.update_dir_listing();
+                            if self.dir_entries.len() > 1 {
+                                self.dir_cursor = 1;
                             }
-                        };
-                        let new_path = format!("{}{}/", dir, entry.name);
-                        self.value = new_path;
-                        self.cursor_pos = self.value.len();
-                        self.dir_cursor = 0;
-                        self.dir_scroll = 0;
-                        self.update_dir_listing();
-                        return InputAction::None;
+                            return InputAction::None;
+                        }
+                        DirEntryKind::File => {
+                            // Fall through to the generic submit below.
+                        }
                     }
                 }
                 let val = self.value.clone();
@@ -219,6 +246,9 @@ impl InputPanel {
             .add_modifier(Modifier::BOLD);
         let selected_style = Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
         let dir_style = Style::default().fg(Color::Rgb(0x51, 0xAF, 0xEF));
+        let sentinel_style = Style::default()
+            .fg(Color::Rgb(0x98, 0xC3, 0x79))
+            .add_modifier(Modifier::BOLD);
 
         let mut y = area.y;
 
@@ -267,15 +297,20 @@ impl InputPanel {
                     break;
                 }
                 let entry = &self.dir_entries[i];
-                let suffix = if entry.is_dir { "/" } else { "" };
-                let text = format!("  {}{}", entry.name, suffix);
+                let text = match entry.kind {
+                    DirEntryKind::Sentinel => format!("  \u{25b8} {}", entry.name),
+                    DirEntryKind::Dir => format!("  {}/", entry.name),
+                    DirEntryKind::File => format!("  {}", entry.name),
+                };
 
                 let style = if i == self.dir_cursor {
                     selected_style
-                } else if entry.is_dir {
-                    dir_style
                 } else {
-                    dim
+                    match entry.kind {
+                        DirEntryKind::Sentinel => sentinel_style,
+                        DirEntryKind::Dir => dir_style,
+                        DirEntryKind::File => dim,
+                    }
                 };
 
                 buf.set_line(area.x, y, &Line::from(Span::styled(text, style)), area.width);
@@ -326,7 +361,7 @@ impl InputPanel {
         let (dir, prefix) = Self::split_dir_prefix(&path);
         let prefix_lower = prefix.to_lowercase();
 
-        self.dir_entries = match fs::read_dir(dir) {
+        let mut real_entries: Vec<DirEntry> = match fs::read_dir(dir) {
             Ok(entries) => entries
                 .filter_map(|e| e.ok())
                 .filter(|e| {
@@ -337,16 +372,32 @@ impl InputPanel {
                 })
                 .map(|e| {
                     let name = e.file_name().to_string_lossy().to_string();
-                    let is_dir = e.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-                    DirEntry { name, is_dir }
+                    let kind = if e.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                        DirEntryKind::Dir
+                    } else {
+                        DirEntryKind::File
+                    };
+                    DirEntry { name, kind }
                 })
                 .collect(),
             Err(_) => Vec::new(),
         };
 
-        // Sort: dirs first, then alphabetically
-        self.dir_entries
-            .sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+        // Sort real entries: dirs first, then alphabetically
+        real_entries.sort_by(|a, b| {
+            let a_dir = a.kind == DirEntryKind::Dir;
+            let b_dir = b.kind == DirEntryKind::Dir;
+            b_dir.cmp(&a_dir).then(a.name.cmp(&b.name))
+        });
+
+        // Pin a synthetic "Select folder" row at the top of every listing so users
+        // have a clear affordance for selecting the current directory.
+        self.dir_entries = Vec::with_capacity(real_entries.len() + 1);
+        self.dir_entries.push(DirEntry {
+            name: "Select folder".to_string(),
+            kind: DirEntryKind::Sentinel,
+        });
+        self.dir_entries.extend(real_entries);
 
         if self.dir_cursor >= self.dir_entries.len() {
             self.dir_cursor = self.dir_entries.len().saturating_sub(1);
@@ -397,6 +448,9 @@ impl InputPanel {
         self.dir_cursor = 0;
         self.dir_scroll = 0;
         self.update_dir_listing();
+        if self.dir_entries.len() > 1 {
+            self.dir_cursor = 1;
+        }
     }
 
     fn expand_path(&self, path: &str) -> String {

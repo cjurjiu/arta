@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::Frame;
 
 use crate::claude_hook;
-use crate::config::{self, Config};
+use crate::config::{self, Config, Multiplexer};
 use crate::input_panel::{InputAction, InputMode, InputPanel};
 use crate::keys;
 use crate::multiplexer::{self, MultiplexerBackend};
@@ -41,6 +41,8 @@ enum InputPurpose {
     ConfigureProjectPath,
     ConfigureOpenCommand,
     ConfigureAgentCommand,
+    ConfigureGlobalAgentCommand,
+    ConfigureGlobalOpenCommand,
 }
 
 const CONFIG_MENU_MAX_VISIBLE: usize = 5;
@@ -53,41 +55,54 @@ enum ConfigOption {
     OpenCommand,
 }
 
-struct ConfigMenu {
-    project: String,
-    items: Vec<(ConfigOption, &'static str)>,
+#[derive(Clone, Copy, PartialEq)]
+enum ArtaSettingOption {
+    CodingAgentCommand,
+    OpenCommand,
+    Multiplexer,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MultiplexerOption {
+    Tmux,
+    Zellij,
+}
+
+struct MenuItem<Opt> {
+    opt: Opt,
+    label: String,
+    description: &'static str,
+    enabled: bool,
+    suffix: Option<String>,
+}
+
+struct ConfigMenu<Opt> {
+    title: String,
+    items: Vec<MenuItem<Opt>>,
     cursor: usize,
     scroll: usize,
 }
 
-impl ConfigMenu {
-    fn new(project: String) -> Self {
-        ConfigMenu {
-            project,
-            items: vec![
-                (ConfigOption::Rename, "Rename"),
-                (ConfigOption::ProjectPath, "Project path"),
-                (ConfigOption::AgentCommand, "Agent command"),
-                (ConfigOption::OpenCommand, "Open command"),
-            ],
-            cursor: 0,
-            scroll: 0,
-        }
-    }
+enum ConfigMenuResult<Opt> {
+    None,
+    Select(Opt),
+    Cancel,
+}
 
+impl<Opt: Copy> ConfigMenu<Opt> {
     fn height(&self) -> u16 {
-        // separator + title + separator + visible items
-        3 + self.items.len().min(CONFIG_MENU_MAX_VISIBLE) as u16
+        // separator + title + separator + visible items + description line
+        4 + self.items.len().min(CONFIG_MENU_MAX_VISIBLE) as u16
     }
 
-    fn selected(&self) -> ConfigOption {
-        self.items[self.cursor].0
+    fn selected(&self) -> Opt {
+        self.items[self.cursor].opt
     }
 
-    fn handle_key(&mut self, key: &KeyEvent) -> ConfigMenuResult {
+    fn handle_key(&mut self, key: &KeyEvent) -> ConfigMenuResult<Opt> {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.cursor < self.items.len() - 1 {
+                if self.cursor + 1 < self.items.len() {
                     self.cursor += 1;
                     if self.cursor >= self.scroll + CONFIG_MENU_MAX_VISIBLE {
                         self.scroll = self.cursor - CONFIG_MENU_MAX_VISIBLE + 1;
@@ -105,7 +120,11 @@ impl ConfigMenu {
                 ConfigMenuResult::None
             }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                ConfigMenuResult::Select(self.selected())
+                if self.items.get(self.cursor).map(|i| i.enabled).unwrap_or(false) {
+                    ConfigMenuResult::Select(self.selected())
+                } else {
+                    ConfigMenuResult::None
+                }
             }
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => ConfigMenuResult::Cancel,
             _ => ConfigMenuResult::None,
@@ -132,10 +151,7 @@ impl ConfigMenu {
         buf.set_line(
             area.x,
             y,
-            &Line::from(Span::styled(
-                format!(" Settings for {}", self.project),
-                bold,
-            )),
+            &Line::from(Span::styled(format!(" {}", self.title), bold)),
             area.width,
         );
         y += 1;
@@ -155,25 +171,176 @@ impl ConfigMenu {
             if y >= area.y + area.height {
                 break;
             }
-            let (_, label) = self.items[i];
+            let item = &self.items[i];
             let is_selected = i == self.cursor;
             let prefix = if is_selected { " \u{25b8} " } else { "   " };
-            let style = if is_selected {
+            let label_full = match &item.suffix {
+                Some(s) => format!("{}{}", item.label, s),
+                None => item.label.clone(),
+            };
+            let style = if !item.enabled {
+                if is_selected {
+                    Style::default().add_modifier(Modifier::DIM | Modifier::REVERSED)
+                } else {
+                    Style::default().add_modifier(Modifier::DIM)
+                }
+            } else if is_selected {
                 Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else {
                 Style::default()
             };
-            let text = format!("{}{:<width$}", prefix, label, width = w.saturating_sub(3));
+            let text = format!("{}{:<width$}", prefix, label_full, width = w.saturating_sub(3));
             buf.set_line(area.x, y, &Line::from(Span::styled(text, style)), area.width);
             y += 1;
+        }
+
+        // Description line for the cursor item
+        if y < area.y + area.height {
+            let desc = self
+                .items
+                .get(self.cursor)
+                .map(|i| i.description)
+                .unwrap_or("");
+            buf.set_line(
+                area.x,
+                y,
+                &Line::from(Span::styled(format!("   {}", desc), dim)),
+                area.width,
+            );
         }
     }
 }
 
-enum ConfigMenuResult {
-    None,
-    Select(ConfigOption),
-    Cancel,
+enum BottomMenu {
+    Project {
+        menu: ConfigMenu<ConfigOption>,
+        project: String,
+    },
+    ArtaSettings(ConfigMenu<ArtaSettingOption>),
+    MultiplexerPick(ConfigMenu<MultiplexerOption>),
+}
+
+impl BottomMenu {
+    fn height(&self) -> u16 {
+        match self {
+            BottomMenu::Project { menu, .. } => menu.height(),
+            BottomMenu::ArtaSettings(m) => m.height(),
+            BottomMenu::MultiplexerPick(m) => m.height(),
+        }
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        match self {
+            BottomMenu::Project { menu, .. } => menu.render(area, buf),
+            BottomMenu::ArtaSettings(m) => m.render(area, buf),
+            BottomMenu::MultiplexerPick(m) => m.render(area, buf),
+        }
+    }
+}
+
+fn build_project_menu(project: &str) -> ConfigMenu<ConfigOption> {
+    ConfigMenu {
+        title: format!("Configure project \u{2014} {}", project),
+        items: vec![
+            MenuItem {
+                opt: ConfigOption::Rename,
+                label: "Rename".to_string(),
+                description: "Change the project's display name",
+                enabled: true,
+                suffix: None,
+            },
+            MenuItem {
+                opt: ConfigOption::ProjectPath,
+                label: "Project path".to_string(),
+                description: "Working directory threads launch in",
+                enabled: true,
+                suffix: None,
+            },
+            MenuItem {
+                opt: ConfigOption::AgentCommand,
+                label: "Agent command".to_string(),
+                description: "Override the default coding-agent command for this project",
+                enabled: true,
+                suffix: None,
+            },
+            MenuItem {
+                opt: ConfigOption::OpenCommand,
+                label: "Open command".to_string(),
+                description: "Command launched by 'open ide' (e.g. webstorm .). Empty = use global default.",
+                enabled: true,
+                suffix: None,
+            },
+        ],
+        cursor: 0,
+        scroll: 0,
+    }
+}
+
+fn build_arta_settings_menu(cfg: &Config) -> ConfigMenu<ArtaSettingOption> {
+    let open_label = if cfg.default_open_command.is_empty() {
+        "Open command  (none)".to_string()
+    } else {
+        format!("Open command  ({})", cfg.default_open_command)
+    };
+    ConfigMenu {
+        title: "ARTA settings".to_string(),
+        items: vec![
+            MenuItem {
+                opt: ArtaSettingOption::CodingAgentCommand,
+                label: format!("Coding agent command  ({})", cfg.coding_agent_command),
+                description: "Default coding-agent command for new threads. Args allowed (e.g. claude --resume)",
+                enabled: true,
+                suffix: None,
+            },
+            MenuItem {
+                opt: ArtaSettingOption::OpenCommand,
+                label: open_label,
+                description: "Default 'open ide' command for projects without an override",
+                enabled: true,
+                suffix: None,
+            },
+            MenuItem {
+                opt: ArtaSettingOption::Multiplexer,
+                label: format!("Multiplexer  ({})", cfg.multiplexer.as_str()),
+                description: "Terminal multiplexer backend. Restart required.",
+                enabled: true,
+                suffix: None,
+            },
+        ],
+        cursor: 0,
+        scroll: 0,
+    }
+}
+
+fn build_multiplexer_picker(current: Multiplexer) -> ConfigMenu<MultiplexerOption> {
+    let tmux_installed = Multiplexer::Tmux.is_installed();
+    let zellij_installed = Multiplexer::Zellij.is_installed();
+    let needs_install = " (needs install)".to_string();
+    let initial_cursor = match current {
+        Multiplexer::Tmux => 0,
+        Multiplexer::Zellij => 1,
+    };
+    ConfigMenu {
+        title: "Multiplexer".to_string(),
+        items: vec![
+            MenuItem {
+                opt: MultiplexerOption::Tmux,
+                label: "tmux".to_string(),
+                description: "Terminal multiplexer backend tmux",
+                enabled: tmux_installed,
+                suffix: if tmux_installed { None } else { Some(needs_install.clone()) },
+            },
+            MenuItem {
+                opt: MultiplexerOption::Zellij,
+                label: "zellij".to_string(),
+                description: "Terminal multiplexer backend zellij",
+                enabled: zellij_installed,
+                suffix: if zellij_installed { None } else { Some(needs_install) },
+            },
+        ],
+        cursor: initial_cursor,
+        scroll: 0,
+    }
 }
 
 pub struct App {
@@ -193,7 +360,7 @@ pub struct App {
     pending_name: Option<String>,
     status_message: Option<String>,
     timed_message: Option<(String, Instant)>,
-    config_menu: Option<ConfigMenu>,
+    bottom_menu: Option<BottomMenu>,
     prefix_active: bool,
     bell_tx: mpsc::Sender<PaneEvent>,
     bell_rx: mpsc::Receiver<PaneEvent>,
@@ -376,7 +543,7 @@ impl App {
             pending_name: None,
             status_message: None,
             timed_message,
-            config_menu: None,
+            bottom_menu: None,
             prefix_active: false,
             bell_tx,
             bell_rx,
@@ -426,7 +593,7 @@ impl App {
             }
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => {
-                if self.input_panel.is_active() || self.config_menu.is_some() {
+                if self.input_panel.is_active() || self.bottom_menu.is_some() {
                     return;
                 }
                 if mouse.column < SIDEBAR_WIDTH {
@@ -464,21 +631,49 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) {
         self.status_message = None;
 
-        // Config menu gets priority
-        if let Some(menu) = &mut self.config_menu {
-            let result = menu.handle_key(&key);
-            match result {
-                ConfigMenuResult::Select(option) => {
-                    let project = menu.project.clone();
-                    self.config_menu = None;
-                    self.handle_config_select(option, &project);
-                }
-                ConfigMenuResult::Cancel => {
-                    self.config_menu = None;
+        // Bottom menu (project config / arta settings / multiplexer picker) gets priority
+        if self.bottom_menu.is_some() {
+            enum Outcome {
+                None,
+                Cancel,
+                SelectProject(ConfigOption, String),
+                SelectArta(ArtaSettingOption),
+                SelectMultiplexer(MultiplexerOption),
+            }
+            let outcome = match self.bottom_menu.as_mut().unwrap() {
+                BottomMenu::Project { menu, project } => match menu.handle_key(&key) {
+                    ConfigMenuResult::None => Outcome::None,
+                    ConfigMenuResult::Cancel => Outcome::Cancel,
+                    ConfigMenuResult::Select(opt) => Outcome::SelectProject(opt, project.clone()),
+                },
+                BottomMenu::ArtaSettings(m) => match m.handle_key(&key) {
+                    ConfigMenuResult::None => Outcome::None,
+                    ConfigMenuResult::Cancel => Outcome::Cancel,
+                    ConfigMenuResult::Select(opt) => Outcome::SelectArta(opt),
+                },
+                BottomMenu::MultiplexerPick(m) => match m.handle_key(&key) {
+                    ConfigMenuResult::None => Outcome::None,
+                    ConfigMenuResult::Cancel => Outcome::Cancel,
+                    ConfigMenuResult::Select(opt) => Outcome::SelectMultiplexer(opt),
+                },
+            };
+            match outcome {
+                Outcome::None => {}
+                Outcome::Cancel => {
+                    self.bottom_menu = None;
                     self.focus = Focus::Sidebar;
                     self.sidebar.set_focused(true);
                 }
-                ConfigMenuResult::None => {}
+                Outcome::SelectProject(opt, project) => {
+                    self.bottom_menu = None;
+                    self.handle_config_select(opt, &project);
+                }
+                Outcome::SelectArta(opt) => {
+                    self.handle_arta_setting_select(opt);
+                }
+                Outcome::SelectMultiplexer(opt) => {
+                    self.apply_multiplexer_choice(opt);
+                }
             }
             return;
         }
@@ -622,8 +817,9 @@ impl App {
                 self.sidebar.set_cursor_to_thread(&id);
             }
             SidebarAction::OpenIde(project) => {
-                if let Some(cmd) = self.workspace.get_project_open_command(&project) {
-                    let cmd = cmd.to_string();
+                let cmd = effective_open_command(&self.workspace, &self.config, &project)
+                    .map(|s| s.to_string());
+                if let Some(cmd) = cmd {
                     let dir = self
                         .workspace
                         .get_project_path(&project)
@@ -637,12 +833,20 @@ impl App {
                             .spawn();
                     }
                 } else {
-                    self.status_message =
-                        Some("No open command configured. Press 'c' to configure.".to_string());
+                    self.status_message = Some(
+                        "No open command configured. Set one via Ctrl+Space, s.".to_string(),
+                    );
                 }
             }
             SidebarAction::ConfigureProject(name) => {
-                self.config_menu = Some(ConfigMenu::new(name));
+                let menu = build_project_menu(&name);
+                self.bottom_menu = Some(BottomMenu::Project { menu, project: name });
+                self.focus = Focus::Input;
+                self.sidebar.set_focused(false);
+            }
+            SidebarAction::ConfigureArta => {
+                let menu = build_arta_settings_menu(&self.config);
+                self.bottom_menu = Some(BottomMenu::ArtaSettings(menu));
                 self.focus = Focus::Input;
                 self.sidebar.set_focused(false);
             }
@@ -824,6 +1028,40 @@ impl App {
                     self.workspace.set_project_agent_command(&project, &value);
                 }
             }
+            Some(InputPurpose::ConfigureGlobalAgentCommand) => {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    self.config.coding_agent_command = trimmed.to_string();
+                    match self.config.save() {
+                        Ok(()) => {
+                            self.timed_message =
+                                Some(("Saved arta settings".to_string(), Instant::now()));
+                        }
+                        Err(e) => {
+                            self.timed_message = Some((
+                                format!("Failed to save settings: {}", e),
+                                Instant::now(),
+                            ));
+                        }
+                    }
+                }
+            }
+            Some(InputPurpose::ConfigureGlobalOpenCommand) => {
+                // Empty input is allowed — it disables the global default fallback.
+                self.config.default_open_command = value.trim().to_string();
+                match self.config.save() {
+                    Ok(()) => {
+                        self.timed_message =
+                            Some(("Saved arta settings".to_string(), Instant::now()));
+                    }
+                    Err(e) => {
+                        self.timed_message = Some((
+                            format!("Failed to save settings: {}", e),
+                            Instant::now(),
+                        ));
+                    }
+                }
+            }
             None => {}
         }
 
@@ -883,6 +1121,65 @@ impl App {
                 );
             }
         }
+    }
+
+    fn handle_arta_setting_select(&mut self, opt: ArtaSettingOption) {
+        match opt {
+            ArtaSettingOption::CodingAgentCommand => {
+                let current = self.config.coding_agent_command.clone();
+                self.bottom_menu = None;
+                self.open_input(
+                    InputPurpose::ConfigureGlobalAgentCommand,
+                    "Default coding agent command (e.g. \"claude\", \"claude --resume\", \"codex\")",
+                    &current,
+                    "",
+                );
+            }
+            ArtaSettingOption::OpenCommand => {
+                let current = self.config.default_open_command.clone();
+                self.bottom_menu = None;
+                self.open_input(
+                    InputPurpose::ConfigureGlobalOpenCommand,
+                    "Default open command (e.g. \"vi\", \"code .\", \"webstorm .\")",
+                    &current,
+                    "",
+                );
+            }
+            ArtaSettingOption::Multiplexer => {
+                let menu = build_multiplexer_picker(self.config.multiplexer);
+                self.bottom_menu = Some(BottomMenu::MultiplexerPick(menu));
+                // Focus stays on Input.
+            }
+        }
+    }
+
+    fn apply_multiplexer_choice(&mut self, opt: MultiplexerOption) {
+        let new_mux = match opt {
+            MultiplexerOption::Tmux => Multiplexer::Tmux,
+            MultiplexerOption::Zellij => Multiplexer::Zellij,
+        };
+        let changed = self.config.multiplexer != new_mux;
+        self.config.multiplexer = new_mux;
+        match self.config.save() {
+            Ok(()) => {
+                if changed {
+                    self.timed_message = Some((
+                        "Restart arta to apply multiplexer change".to_string(),
+                        Instant::now(),
+                    ));
+                } else {
+                    self.timed_message =
+                        Some(("Saved arta settings".to_string(), Instant::now()));
+                }
+            }
+            Err(e) => {
+                self.timed_message =
+                    Some((format!("Failed to save settings: {}", e), Instant::now()));
+            }
+        }
+        self.bottom_menu = None;
+        self.focus = Focus::Sidebar;
+        self.sidebar.set_focused(true);
     }
 
     fn create_thread(&mut self, project_name: &str) {
@@ -1111,7 +1408,7 @@ impl App {
         let mut main_height = size.height;
         if self.input_panel.is_active() {
             main_height = size.height.saturating_sub(INPUT_PANEL_HEIGHT + 1).max(5);
-        } else if let Some(menu) = &self.config_menu {
+        } else if let Some(menu) = &self.bottom_menu {
             main_height = size.height.saturating_sub(menu.height()).max(5);
         }
 
@@ -1266,8 +1563,8 @@ impl App {
             frame.set_cursor_position((cx, cy));
         }
 
-        // Config menu
-        if let Some(menu) = &self.config_menu {
+        // Bottom menu (project config / arta settings / multiplexer picker)
+        if let Some(menu) = &self.bottom_menu {
             let panel_y = main_height;
             let panel_height = size.height.saturating_sub(main_height);
             let panel_area = Rect::new(0, panel_y, size.width, panel_height);
@@ -1280,7 +1577,7 @@ impl App {
         let mut main_height = self.height;
         if self.input_panel.is_active() {
             main_height = main_height.saturating_sub(INPUT_PANEL_HEIGHT + 1);
-        } else if let Some(menu) = &self.config_menu {
+        } else if let Some(menu) = &self.bottom_menu {
             main_height = main_height.saturating_sub(menu.height());
         }
         // 1 line top padding + 2 status lines + 1 line bottom border (when focused)
@@ -1332,6 +1629,24 @@ fn effective_agent_command<'a>(
     workspace
         .get_project_agent_command(project)
         .unwrap_or(&config.coding_agent_command)
+}
+
+/// Returns the open command for a given project: per-project override if set,
+/// otherwise the global default. Returns None when neither is configured
+/// (i.e. user explicitly cleared the global default).
+fn effective_open_command<'a>(
+    workspace: &'a Workspace,
+    config: &'a Config,
+    project: &str,
+) -> Option<&'a str> {
+    if let Some(cmd) = workspace.get_project_open_command(project) {
+        return Some(cmd);
+    }
+    if config.default_open_command.is_empty() {
+        None
+    } else {
+        Some(config.default_open_command.as_str())
+    }
 }
 
 /// Strip leading non-alphanumeric characters from an agent's terminal title

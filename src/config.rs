@@ -1,7 +1,7 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Multiplexer {
     Tmux,
@@ -14,15 +14,67 @@ impl Default for Multiplexer {
     }
 }
 
+impl Multiplexer {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Multiplexer::Tmux => "tmux",
+            Multiplexer::Zellij => "zellij",
+        }
+    }
+
+    /// Returns true if the underlying CLI is on PATH.
+    ///
+    /// We walk PATH directly instead of running `<bin> --version`: invoking
+    /// `tmux --version` from inside a live tmux session can fail or hang in
+    /// some setups, which would falsely report tmux as missing.
+    pub fn is_installed(&self) -> bool {
+        let bin = self.as_str();
+        let path_env = match std::env::var_os("PATH") {
+            Some(p) => p,
+            None => return false,
+        };
+        for dir in std::env::split_paths(&path_env) {
+            let candidate = dir.join(bin);
+            if !candidate.is_file() {
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(&candidate) {
+                    if meta.permissions().mode() & 0o111 != 0 {
+                        return true;
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 
 fn default_coding_agent_command() -> String {
     "claude".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+fn default_open_command() -> String {
+    // `vi` is the only editor universally available across macOS and Linux
+    // out of the box. Users typically override per-project to `code .`,
+    // `webstorm .`, etc.
+    "vi".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_coding_agent_command")]
     pub coding_agent_command: String,
+
+    #[serde(default = "default_open_command")]
+    pub default_open_command: String,
 
     #[serde(default)]
     pub multiplexer: Multiplexer,
@@ -31,7 +83,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            coding_agent_command: "claude".to_string(),
+            coding_agent_command: default_coding_agent_command(),
+            default_open_command: default_open_command(),
             multiplexer: Multiplexer::default(),
         }
     }
@@ -44,6 +97,16 @@ impl Config {
             Ok(data) => serde_yaml::from_str(&data).unwrap_or_default(),
             Err(_) => Config::default(),
         }
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        let path = config_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let yaml = serde_yaml::to_string(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(&path, yaml)
     }
 }
 
@@ -128,6 +191,7 @@ mod tests {
     fn test_config_defaults() {
         let config = Config::default();
         assert_eq!(config.coding_agent_command, "claude");
+        assert_eq!(config.default_open_command, "vi");
         assert_eq!(config.multiplexer, Multiplexer::Tmux);
     }
 
@@ -174,7 +238,30 @@ multiplexer_init_script: "/path/to/script.sh"
         let yaml = "{}";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.coding_agent_command, "claude");
+        assert_eq!(config.default_open_command, "vi");
         assert_eq!(config.multiplexer, Multiplexer::Tmux);
+    }
+
+    #[test]
+    fn test_config_serialize_roundtrip() {
+        let cfg = Config {
+            coding_agent_command: "codex".to_string(),
+            default_open_command: "code .".to_string(),
+            multiplexer: Multiplexer::Zellij,
+        };
+        let yaml = serde_yaml::to_string(&cfg).unwrap();
+        let parsed: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.coding_agent_command, "codex");
+        assert_eq!(parsed.default_open_command, "code .");
+        assert_eq!(parsed.multiplexer, Multiplexer::Zellij);
+        // Ensure multiplexer round-trips as the lowercase form expected by humans.
+        assert!(yaml.contains("multiplexer: zellij"));
+    }
+
+    #[test]
+    fn test_multiplexer_as_str() {
+        assert_eq!(Multiplexer::Tmux.as_str(), "tmux");
+        assert_eq!(Multiplexer::Zellij.as_str(), "zellij");
     }
 
     #[test]

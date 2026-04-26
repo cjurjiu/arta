@@ -31,12 +31,13 @@ Organize projects in a sidebar, run multiple threads (each backed by tmux or zel
 
 - **Project sidebar** — add, rename, reorder, and remove projects
 - **Tmux or Zellij threads** — each thread runs your coding agent + a shell, backed by a tmux (default) or zellij session for persistence
-- **Configurable coding agent** — defaults to `claude`, but can be set globally to `codex`, `gemini`, `opencode`, or any command, with per-project overrides (use a different agent — or a different invocation of the same agent — on a per-project basis)
+- **Configurable coding agent** — defaults to `claude`, but can be set globally to `codex`, `gemini`, `opencode`, or any command (and arguments — e.g. `claude --resume`), with per-project overrides (use a different agent — or a different invocation of the same agent — on a per-project basis)
+- **In-app settings** — change the global agent command, default IDE open command, or multiplexer backend from inside ARTA (`Ctrl+Space s`); no need to edit YAML by hand
 - **Auto-named threads** — threads pick up their name from the agent's terminal title (e.g., `Refactoring auth module`) instead of showing generic IDs. Manual rename (`Ctrl+Space r`) pins the name and disables further auto-updates
 - **Thread persistence** — quit ARTA, threads keep running. Reopen and reattach instantly
 - **Thread restore** — remembers and reopens your last active thread on startup
 - **Multiple profiles** — use `ARTA_CONFIG_ROOT` and `ARTA_SESSION_PREFIX` env vars to run independent ARTA instances with separate configs and threads
-- **Open IDE** — press `o` to launch your configured IDE (e.g., `webstorm .`, `idea .`) for any project
+- **Open IDE** — press `o` to launch your configured IDE (e.g., `webstorm .`, `idea .`) for any project; falls back to a global default (`vi` out of the box) when no per-project override is set
 - **Project configuration** — press `c` to configure project name, path, or open command via a navigable menu
 - **Bell notifications** — focus-aware bells via a Claude Code `Notification` hook (auto-installed into `~/.claude/settings.json`); shows a sidebar indicator and plays a sound for unfocused threads, reliable across tmux and zellij
 - **Nerd Font detection** — auto-detects and uses icons when available, falls back to Unicode
@@ -110,6 +111,7 @@ arta
 | `r` | Rename project or thread (pins thread name, disables auto-rename) |
 | `a` | Add project (path → name → open command) |
 | `c` | Configure project (rename, path, agent command, open command) |
+| `s` | ARTA settings (global agent command, default open command, multiplexer) |
 | `d` | Delete selected item (project or thread) |
 | `g` | Copy GitHub link to clipboard |
 | `q` | Quit (threads survive in the background) |
@@ -154,19 +156,34 @@ When adding a project or renaming:
 | `Esc` | Cancel |
 | `Left` / `Right` | Move cursor in text |
 
+When picking a folder, every directory listing has a pinned **`▸ Select folder`** row at the top — highlight it and press `Enter` to use the current path as the project root.
+
 ## Configuration
 
 ARTA stores its configuration and workspace state under `~/.arta/` by default.
 
+### In-app settings (`Ctrl+Space s`)
+
+You can change every global setting from inside ARTA — open the **ARTA settings** menu with `Ctrl+Space s`. Each row shows the current value and a one-line description; selecting a row opens an editor (a text input for free-form values, a tmux/zellij picker for the multiplexer). Changes are persisted to `~/.arta/config.yaml` immediately. The multiplexer change requires a restart; the others apply to the next thread you create.
+
+The multiplexer picker also detects which backend is installed on your `PATH` and dims the unavailable one with `(needs install)`.
+
 ### Config file (`~/.arta/config.yaml`)
 
-All fields are optional — ARTA uses sensible defaults if the file is missing or incomplete.
+All fields are optional — ARTA uses sensible defaults if the file is missing or incomplete. You can edit by hand or use the in-app settings menu above.
 
 ```yaml
 # The command launched in the agent window of new threads (default: "claude").
-# This is the global default; individual projects can override it via
-# Ctrl+Space c → Agent command.
+# Arguments are allowed — e.g. "claude --resume" to auto-resume the last
+# session. This is the global default; individual projects can override it
+# via Ctrl+Space c → Agent command.
 coding_agent_command: claude
+
+# The default command for "open ide" (Ctrl+Space o) when a project has no
+# per-project override. Defaults to "vi" (universal across macOS/Linux).
+# Common picks: "code .", "webstorm .", "idea .", "open ." (macOS Finder).
+# Set to an empty string to disable the global fallback.
+default_open_command: vi
 
 # Terminal multiplexer backend: "tmux" (default) or "zellij"
 multiplexer: tmux

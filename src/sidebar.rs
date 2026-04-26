@@ -20,6 +20,7 @@ pub enum SidebarAction {
     MoveThread(String, i32),
     OpenIde(String),
     ConfigureProject(String),
+    ConfigureArta,
     CopyGithubLink,
     FocusTerminal,
     Quit,
@@ -268,6 +269,7 @@ impl Sidebar {
                 }
             }),
             KeyCode::Char('g') => SidebarAction::CopyGithubLink,
+            KeyCode::Char('s') => SidebarAction::ConfigureArta,
             KeyCode::Char('q') => SidebarAction::Quit,
             KeyCode::Char('Q') => SidebarAction::CleanExit,
             _ => SidebarAction::None,
@@ -577,12 +579,16 @@ impl Sidebar {
                 vec![
                     Span::styled(" a", bold),
                     Span::styled(" add project  ", dim),
-                    Span::styled("c", bold),
-                    Span::styled(" config", dim),
+                    Span::styled("d", bold),
+                    Span::styled(" delete", dim),
                 ],
                 vec![
-                    Span::styled(" d", bold),
-                    Span::styled(" delete  ", dim),
+                    Span::styled(" c", bold),
+                    Span::styled(" configure project", dim),
+                ],
+                vec![
+                    Span::styled(" s", bold),
+                    Span::styled(" arta settings  ", dim),
                     Span::styled("g", bold),
                     Span::styled(" github", dim),
                 ],
